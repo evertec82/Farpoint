@@ -22,7 +22,11 @@ if ($Test) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & "$testDir/farpoint_compat_test.exe"
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    Write-Output 'Farpoint compatibility tests passed'
+    & "$llvmBin/clang-cl.exe" /nologo /std:c++latest /MD /EHsc -fuse-ld=lld "/I$sourceRoot/src" "$testsRoot/staged_file_read_test.cpp" "/Fe:$testDir/staged_file_read_test.exe" "/Fo:$testDir/"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & "$testDir/staged_file_read_test.exe"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Write-Output 'Farpoint compatibility and protected-page file read tests passed'
     exit 0
 }
 $buildDir = Join-Path $repoRoot 'build/win-fix'

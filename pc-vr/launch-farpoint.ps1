@@ -2,6 +2,7 @@ param(
     [string]$GamePath,
     [ValidateSet('Aim','Gamepad')][string]$Controller = 'Aim',
     [ValidateSet(0,30,60)][int]$MirrorFps = 60,
+    [ValidateSet(960)][int]$EyeWidth = 960,
     [switch]$NoGui,
     [switch]$ValidateOnly
 )
@@ -16,6 +17,7 @@ if (-not $GamePath) {
         if ($saved.GamePath) { $GamePath = $saved.GamePath }
         if (-not $PSBoundParameters.ContainsKey('Controller') -and $saved.Controller -in @('Aim','Gamepad')) { $Controller = $saved.Controller }
         if (-not $PSBoundParameters.ContainsKey('MirrorFps') -and $saved.MirrorFps -in @(0,30,60)) { $MirrorFps = [int]$saved.MirrorFps }
+        if (-not $PSBoundParameters.ContainsKey('EyeWidth') -and $saved.EyeWidth -eq 960) { $EyeWidth = [int]$saved.EyeWidth }
     }
 }
 if (-not $NoGui -and -not $ValidateOnly) {
@@ -24,7 +26,7 @@ if (-not $NoGui -and -not $ValidateOnly) {
     [System.Windows.Forms.Application]::EnableVisualStyles()
     $form = New-Object System.Windows.Forms.Form
     $form.Text = 'Farpoint PC VR - Development build'
-    $form.ClientSize = New-Object System.Drawing.Size(620,295)
+    $form.ClientSize = New-Object System.Drawing.Size(620,365)
     $form.StartPosition = 'CenterScreen'
     $form.FormBorderStyle = 'FixedDialog'
     $form.MaximizeBox = $false
@@ -56,16 +58,23 @@ if (-not $NoGui -and -not $ValidateOnly) {
     $mirror.DropDownStyle = 'DropDownList'; $mirror.SetBounds(395,147,205,25)
     [void]$mirror.Items.Add('60 FPS'); [void]$mirror.Items.Add('30 FPS'); [void]$mirror.Items.Add('Uncapped')
     $mirror.SelectedIndex = if ($MirrorFps -eq 60) { 0 } elseif ($MirrorFps -eq 30) { 1 } else { 2 }; $form.Controls.Add($mirror)
+    $resolutionLabel = New-Object System.Windows.Forms.Label
+    $resolutionLabel.Text = 'Headset resolution per eye'; $resolutionLabel.SetBounds(18,187,560,20); $form.Controls.Add($resolutionLabel)
+    $resolution = New-Object System.Windows.Forms.ComboBox
+    $resolution.DropDownStyle = 'DropDownList'; $resolution.SetBounds(18,211,582,25)
+        [void]$resolution.Items.Add('Original PSVR - 960 x 1080')
+    $resolution.SelectedIndex = 0; $form.Controls.Add($resolution)
     $info = New-Object System.Windows.Forms.Label
-    $info.Text = 'Uses native game resolution and timing. Connect the headset through your active OpenXR runtime before starting. The mirror setting does not cap headset frames.'
-    $info.SetBounds(18,187,580,45); $form.Controls.Add($info)
+    $info.Text = 'Connect the headset through your active OpenXR runtime before starting. Original eye layout; experimental higher resolution disabled. The mirror setting does not cap headset frames.'
+    $info.SetBounds(18,257,580,45); $form.Controls.Add($info)
     $play = New-Object System.Windows.Forms.Button
-    $play.Text = 'Start Farpoint'; $play.SetBounds(455,245,145,32)
+    $play.Text = 'Start Farpoint'; $play.SetBounds(455,315,145,32)
     $play.DialogResult = 'OK'; $form.AcceptButton = $play; $form.Controls.Add($play)
     if ($form.ShowDialog() -ne 'OK') { $form.Dispose(); return }
     $GamePath = $pathBox.Text
     $Controller = if ($controls.SelectedIndex -eq 0) { 'Aim' } else { 'Gamepad' }
     $MirrorFps = @(60,30,0)[$mirror.SelectedIndex]
+    $EyeWidth = 960
     $form.Dispose()
 }
 if (-not (Test-Path -LiteralPath $exe)) { throw "Missing emulator: $exe" }
@@ -78,7 +87,7 @@ if ((Get-FileHash -LiteralPath $GamePath -Algorithm SHA256).Hash -ne $expectedHa
     throw 'This build currently supports only the tested Farpoint CUSA04508 version 1.00 executable.'
 }
 if ($ValidateOnly) {
-    [pscustomobject]@{ GamePath=$GamePath; Controller=$Controller; MirrorFps=$MirrorFps; Executable=$exe }
+    [pscustomobject]@{ GamePath=$GamePath; Controller=$Controller; MirrorFps=$MirrorFps; EyeWidth=$EyeWidth; Executable=$exe }
     return
 }
 if (Get-Process shadps4 -ErrorAction SilentlyContinue) { throw 'Close the running emulator before starting Farpoint.' }
@@ -90,13 +99,14 @@ $config.Input.special_pad_class = 9
 $config.General.connected_to_network = $false
 $config.General.shad_net_enabled = $false
 $config | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $configPath -Encoding UTF8
-@{ GamePath=$GamePath; Controller=$Controller; MirrorFps=$MirrorFps } | ConvertTo-Json | Set-Content -LiteralPath $settingsFile -Encoding UTF8
+@{ GamePath=$GamePath; Controller=$Controller; MirrorFps=$MirrorFps; EyeWidth=$EyeWidth } | ConvertTo-Json | Set-Content -LiteralPath $settingsFile -Encoding UTF8
 $env:SHADPS4_OPENXR = '1'; $env:SHADPS4_VR = '1'
 $env:SHADPS4_XR_WAIT = '0'; $env:SHADPS4_XR_PAUSE = '0'
 $env:SHADPS4_XR_GAMEPAD_LAYOUT = '1'
 $env:SHADPS4_XR_PAD_HAND = 'right'
 $env:SHADPS4_VR_WINDOW_FPS = [string]$MirrorFps
 $env:SHADPS4_FARPOINT_OFFLINE_SCORE = '1'
+$env:SHADPS4_FARPOINT_EYE_WIDTH = ''
 # Astro-specific patches and automation must not leak into this title.
 $env:SHADPS4_TITLE_RESOLUTION = 'title'; $env:SHADPS4_TITLE_EYE_WIDTH = ''
 $env:SHADPS4_VR_PACE = ''; $env:SHADPS4_VR_FPS_CAP = ''

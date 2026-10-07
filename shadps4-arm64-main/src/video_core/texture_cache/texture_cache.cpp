@@ -10,6 +10,7 @@
 #include <magic_enum/magic_enum.hpp>
 
 #include "common/assert.h"
+#include "common/elf_info.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
 #include "common/logging/log.h"
@@ -369,6 +370,44 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
 ImageId TextureCache::ResolveDimensionOverlap(const ImageInfo& requested_info,
                                               ImageId cache_image_id) {
     auto& cache_image = slot_images[cache_image_id];
+    // UE4 generates Farpoint's LUT through a 2D-array target, then samples it
+    // as a volume. Recreating either view must preserve the other backing's pixels.
+    const auto lut_volume = [](const ImageInfo& info) {
+        return info.props.is_volume && info.size.width == 32 && info.size.height == 32 &&
+               info.size.depth == 32 && info.resources.layers == 1;
+    };
+    const auto lut_array = [](const ImageInfo& info) {
+        return !info.props.is_volume && info.size.width == 32 && info.size.height == 32 &&
+               info.size.depth == 1 && info.resources.layers == 32;
+    };
+    if (Common::ElfInfo::Instance().GameSerial() == "CUSA04508" &&
+        ((lut_volume(requested_info) && lut_array(cache_image.info)) ||
+         (lut_array(requested_info) && lut_volume(cache_image.info))) &&
+        requested_info.pixel_format == vk::Format::eA2B10G10R10UnormPack32 &&
+        requested_info.pixel_format == cache_image.info.pixel_format &&
+        requested_info.resources.levels == 1 && cache_image.info.resources.levels == 1 &&
+        requested_info.num_samples == 1 && cache_image.info.num_samples == 1) {
+        const auto new_id = slot_images.insert(instance, scheduler, blit_helper,
+                                               slot_image_views, requested_info);
+        RegisterImage(new_id);
+        auto& source = slot_images[cache_image_id];
+        auto& destination = slot_images[new_id];
+        RefreshImage(source);
+        destination.CopyImage(source);
+        destination.usage = source.usage;
+        destination.flags &= ~ImageFlagBits::Dirty;
+        destination.flags |= source.flags & ImageFlagBits::GpuModified;
+        if (source.binding.is_bound || source.binding.is_target) {
+            source.binding.needs_rebind = 1u;
+        }
+        FreeImage(cache_image_id);
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            LOG_INFO(Render_Vulkan, "Farpoint color LUT: preserve pixels across array/volume views");
+        }
+        return new_id;
+    }
     if (!NeedsViewTypeRecreation(requested_info.type, cache_image.info.type)) {
         return {};
     }

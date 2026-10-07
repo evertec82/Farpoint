@@ -14,10 +14,10 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-// Preserve upstream 0.20 geometry-input ABI and invocation-ID correction.
-static constexpr u32 ShaderBinaryVersion = 3u;
+// Invalidate intermediate Farpoint shader experiments; retain upstream 0.20 ABI fixes.
+static constexpr u32 ShaderBinaryVersion = 5u;
 // Inline image/sampler lists replace pointer-containing small vectors.
-static constexpr u32 ShaderMetaVersion = 3u;
+static constexpr u32 ShaderMetaVersion = 5u;
 static constexpr u32 PipelineKeyVersion = 3u;
 } // namespace Serialization
 
