@@ -100,6 +100,7 @@ $env:SHADPS4_FARPOINT_OFFLINE_SCORE = '1'
 # Astro-specific patches and automation must not leak into this title.
 $env:SHADPS4_TITLE_RESOLUTION = 'title'; $env:SHADPS4_TITLE_EYE_WIDTH = ''
 $env:SHADPS4_VR_PACE = ''; $env:SHADPS4_VR_FPS_CAP = ''
+$env:SHADPS4_INPUT_SCRIPT = ''; $env:SHADPS4_LIVE_INPUT = ''
 $env:SHADPS4_XR_TEST_PRESS = ''; $env:SHADPS4_XR_TEST_TURN = ''
 $process = Start-Process -FilePath $exe -WorkingDirectory $PSScriptRoot -ArgumentList @('-g',('"' + $GamePath + '"')) -PassThru
 Write-Host "Farpoint started. Log: $PSScriptRoot\user\log\shad_log.txt"

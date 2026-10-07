@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "common/logging/log.h"
+#include "common/elf_info.h"
+#include "core/libraries/vr_tracker/tracker_compat.h"
 #include "core/known_title.h"
 #include "core/libraries/error_codes.h"
 #include "core/libraries/kernel/time.h"
@@ -147,6 +149,13 @@ s32 PS4_SYSV_ABI sceVrTrackerQueryMemory(const OrbisVrTrackerQueryMemoryParam* p
 }
 
 s32 PS4_SYSV_ABI sceVrTrackerInit(const OrbisVrTrackerInitParam* param) {
+    if (!param) return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID;
+    OrbisVrTrackerInitParam compatible{};
+    if (Common::ElfInfo::Instance().GameSerial() == "CUSA04508" && param->size == 144) {
+        DecodeFarpointTrackerInit144(param, param->size, compatible);
+        param = &compatible;
+        LOG_INFO(Lib_VrTracker, "Using Farpoint's 144-byte tracker initialization ABI");
+    }
     if (g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_ALREADY_INITIALIZED;
     }
@@ -237,7 +246,7 @@ s32 PS4_SYSV_ABI sceVrTrackerRegisterDevice2(const OrbisVrTrackerDeviceType devi
 
 s32 PS4_SYSV_ABI sceVrTrackerRegisterDeviceInternal(const OrbisVrTrackerDeviceType device_type,
                                                     const s32 handle, s32 unk0, s32 unk1) {
-    LOG_WARNING(Lib_VrTracker, "(STUBBED) called, device_type = {}, handle = {}",
+    LOG_DEBUG(Lib_VrTracker, "Register device_type = {}, handle = {}",
                 static_cast<u32>(device_type), handle);
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
@@ -332,7 +341,14 @@ s32 PS4_SYSV_ABI sceVrTrackerCpuProcess(const OrbisVrTrackerCpuProcessParam* par
 }
 
 s32 PS4_SYSV_ABI sceVrTrackerGetPlayAreaWarningInfo(OrbisVrTrackerPlayAreaWarningInfo* info) {
-    LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    if (!info || info->size != sizeof(*info)) {
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID;
+    }
+    const auto size = info->size;
+    *info = {};
+    info->size = size;
+    // The OpenXR runtime owns the physical play-area boundary. No PS camera distance
+    // measurement is available, so leave distance validity false.
     return ORBIS_OK;
 }
 
@@ -341,6 +357,12 @@ s32 PS4_SYSV_ABI sceVrTrackerGetResult(const OrbisVrTrackerGetResultParam* param
     LOG_TRACE(Lib_VrTracker, "called");
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
+    }
+    static std::atomic<unsigned> diagnostics{};
+    if (diagnostics.fetch_add(1) < 8 && param) {
+        LOG_INFO(Lib_VrTracker, "Tracker request: size {} expected {}, handle {}, type {}",
+                 param->size, sizeof(OrbisVrTrackerGetResultParam), param->handle,
+                 static_cast<unsigned>(param->result_type));
     }
     if (param == nullptr || result == nullptr ||
         param->size != sizeof(OrbisVrTrackerGetResultParam) || param->handle < 0) {
@@ -491,7 +513,7 @@ s32 PS4_SYSV_ABI sceVrTrackerGpuWait(const OrbisVrTrackerGpuWaitParam* param) {
 }
 
 s32 PS4_SYSV_ABI sceVrTrackerGpuWaitAndCpuProcess() {
-    LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    LOG_TRACE(Lib_VrTracker, "Host tracking replaces camera GPU/CPU processing");
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }
@@ -608,7 +630,7 @@ s32 PS4_SYSV_ABI sceVrTrackerSetRestingMode() {
 
 s32 PS4_SYSV_ABI
 sceVrTrackerUpdateMotionSensorData(const OrbisVrTrackerUpdateMotionSensorDataParam* param) {
-    LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    LOG_TRACE(Lib_VrTracker, "Motion data supplied by host tracking");
     return ORBIS_OK;
 }
 

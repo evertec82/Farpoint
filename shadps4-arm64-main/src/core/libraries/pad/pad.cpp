@@ -12,6 +12,7 @@
 #include "core/vr/vr_runtime.h"
 #include "imgui/renderer/imgui_core.h"
 #include "input/controller.h"
+#include "input/pad_routing.h"
 #include "pad.h"
 
 #include <algorithm>
@@ -43,6 +44,17 @@ static bool g_initialized = false;
 static u64 pad_handle_counter = 1;
 static std::unordered_map<HandleKey, s32, HandleKeyHash> pad_handle_map{};
 static std::unordered_map<s32, GameController*> handle_to_controller_map{};
+
+static bool SpecialPadHandle(s32 handle) {
+    const bool farpoint = Common::ElfInfo::Instance().GameSerial() == "CUSA04508";
+    for (const auto& [key, opened] : pad_handle_map) {
+        if (opened == handle) {
+            return Input::PadPortIsSpecial(farpoint, EmulatorSettings.IsUsingSpecialPad(),
+                                           key.device_class);
+        }
+    }
+    return EmulatorSettings.IsUsingSpecialPad();
+}
 
 // SnowRunner title polls scePadReadState with handle 1 and never calls scePadOpen.
 // Desktop SDL discovery opens a handle first; Android only ConnectController().
@@ -107,7 +119,7 @@ int PS4_SYSV_ABI scePadDeviceClassGetExtendedInformation(
     }
     LOG_ERROR(Lib_Pad, "(STUBBED) called");
     std::memset(pExtInfo, 0, sizeof(OrbisPadDeviceClassExtendedInformation));
-    if (EmulatorSettings.IsUsingSpecialPad()) {
+    if (SpecialPadHandle(handle)) {
         pExtInfo->deviceClass = (OrbisPadDeviceClass)EmulatorSettings.GetSpecialPadClass();
     }
     return ORBIS_OK;
@@ -192,7 +204,7 @@ int PS4_SYSV_ABI scePadGetControllerInformation(s32 handle, OrbisPadControllerIn
     pInfo->deviceClass = OrbisPadDeviceClass::Standard;
     pInfo->connected = connected;
     if (connected) {
-        pInfo->deviceClass = EmulatorSettings.IsUsingSpecialPad()
+        pInfo->deviceClass = SpecialPadHandle(handle)
                                  ? (OrbisPadDeviceClass)EmulatorSettings.GetSpecialPadClass()
                                  : OrbisPadDeviceClass::Standard;
     }
@@ -388,10 +400,12 @@ int PS4_SYSV_ABI scePadOpen(Libraries::UserService::OrbisUserServiceUserId userI
     s32 new_handle = pad_handle_counter++;
     pad_handle_map[{userId, type, index}] = new_handle;
 
-    handle_to_controller_map[new_handle] =
-        controllers[type == (EmulatorSettings.IsUsingSpecialPad() ? 2 : 0)
-                        ? UserManagement.GetUserByID(userId)->player_index - 1
-                        : 4];
+    const bool player_port = Input::PlayerUsesPadPort(
+        Common::ElfInfo::Instance().GameSerial() == "CUSA04508",
+        EmulatorSettings.IsUsingSpecialPad(), type);
+    handle_to_controller_map[new_handle] = controllers[player_port ? u->player_index - 1 : 4];
+    LOG_INFO(Lib_Pad, "Pad route: handle {}, port {}, controller {}", new_handle, type,
+             player_port ? u->player_index - 1 : 4);
     LOG_INFO(Lib_Pad,
              "called user_id = {}, type = {}, index = {}, player index = {}, out handle = {}",
              userId, type, index, u->player_index, new_handle);

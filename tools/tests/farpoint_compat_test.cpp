@@ -1,13 +1,57 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "core/libraries/libc_internal/guest_ctype.h"
 #include "core/libraries/libc_internal/libc_internal_cxa.h"
+#include "core/libraries/vr_tracker/tracker_compat.h"
 #include "core/vr/stereo_layout.h"
+#include "input/pad_routing.h"
 #include <atomic>
 #include <cassert>
 #include <cmath>
 #include <thread>
 #include <vector>
 int main() {
+  using namespace Libraries::VrTracker;
+  std::array<unsigned char, 144> wire{};
+  auto put32 = [&](std::size_t offset, u32 value) {
+    std::memcpy(wire.data() + offset, &value, 4);
+  };
+  auto put64 = [&](std::size_t offset, u64 value) {
+    std::memcpy(wire.data() + offset, &value, 8);
+  };
+  put32(0, 144);
+  put32(0x20, 0);
+  put32(0x24, 1);
+  put32(0x28, 1);
+  put32(0x2c, 1);
+  put64(0x40, 0x29ec40000);
+  put32(0x48, 0x800000);
+  put32(0x4c, 0x10000);
+  put64(0x50, 0x20f280000);
+  put32(0x58, 0x3000000);
+  put32(0x5c, 0x10000);
+  put64(0x60, 0x200050000);
+  put32(0x68, 0x1000000);
+  put32(0x6c, 0x10000);
+  put32(0x70, 6);
+  OrbisVrTrackerInitParam decoded{};
+  assert(DecodeFarpointTrackerInit144(wire.data(), wire.size(), decoded));
+  assert(decoded.size == 128 && decoded.cpu_mask == 0);
+  assert(decoded.calibration_settings.hmd_position == 0 &&
+         decoded.calibration_settings.move_position == 1);
+  assert(reinterpret_cast<u64>(decoded.direct_memory_onion) == 0x29ec40000);
+  assert(decoded.direct_memory_onion_size == 0x800000 &&
+         decoded.direct_memory_garlic_size == 0x3000000);
+  assert(reinterpret_cast<u64>(decoded.work_memory) == 0x200050000 &&
+         decoded.gpu_pipe_id == 6);
+  assert(!DecodeFarpointTrackerInit144(wire.data(), 128, decoded));
+
+  assert(Input::PlayerUsesPadPort(true, true, 0));
+  assert(Input::PlayerUsesPadPort(true, true, 2));
+  assert(!Input::PlayerUsesPadPort(false, true, 0));
+  assert(!Input::PlayerUsesPadPort(true, false, 2));
+  assert(Input::PlayerUsesPadPort(true, false, 0));
+  assert(!Input::PadPortIsSpecial(true, true, 0));
+  assert(Input::PadPortIsSpecial(true, true, 2));
   using namespace Libraries::LibcInternal;
   const auto *classes = GuestCtype.classes.data() + 128;
   const auto *lower = GuestCtype.lower.data() + 128;
