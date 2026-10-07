@@ -5,6 +5,7 @@
 #include "common/logging/log.h"
 #include "core/libraries/error_codes.h"
 #include "core/libraries/libs.h"
+#include "guest_ctype.h"
 #include "libc_internal_str.h"
 
 namespace Libraries::LibcInternal {
@@ -72,7 +73,22 @@ const char* PS4_SYSV_ABI internal_strchr(const char* str, int c) {
     return std::strchr(str, c);
 }
 
+const u16* PS4_SYSV_ABI internal_getpctype() {
+    return GuestCtype.classes.data() + 128;
+}
+const s16* PS4_SYSV_ABI internal_getptolower() {
+    return GuestCtype.lower.data() + 128;
+}
+const s16* PS4_SYSV_ABI internal_getptoupper() {
+    return GuestCtype.upper.data() + 128;
+}
+
 void RegisterlibSceLibcInternalStr(Core::Loader::SymbolsResolver* sym) {
+    LIB_FUNCTION("sUP1hBaouOw", "libSceLibcInternal", 1, "libSceLibcInternal", internal_getpctype);
+    LIB_FUNCTION("1uJgoVq3bQU", "libSceLibcInternal", 1, "libSceLibcInternal",
+                 internal_getptolower);
+    LIB_FUNCTION("rcQCUr0EaRU", "libSceLibcInternal", 1, "libSceLibcInternal",
+                 internal_getptoupper);
     LIB_FUNCTION("5Xa2ACNECdo", "libSceLibcInternal", 1, "libSceLibcInternal", internal_strcpy_s);
     LIB_FUNCTION("K+gcnFFJKVc", "libSceLibcInternal", 1, "libSceLibcInternal", internal_strcat_s);
     LIB_FUNCTION("Ovb2dSJOAuE", "libSceLibcInternal", 1, "libSceLibcInternal", internal_strcmp);

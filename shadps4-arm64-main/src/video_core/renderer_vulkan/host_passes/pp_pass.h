@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <optional>
 #include <span>
 
@@ -13,7 +14,7 @@
 namespace Vulkan {
 class Instance;
 class Frame;
-}
+} // namespace Vulkan
 
 namespace Vulkan::HostPasses {
 
@@ -26,7 +27,10 @@ public:
         float sharpen = 0.0f;
         /// For an output image of an sRGB format, which does the encoding for display itself.
         u32 linear_out = 0;
+        std::array<float, 4> source_uv{1.0f, 1.0f, 0.0f, 0.0f};
     };
+
+    static_assert(sizeof(Settings) == 32); // Matches the fragment shader push constants.
 
     void Create(const Instance& instance, MasterSemaphore* master_semaphore,
                 vk::Format surface_format);
@@ -36,6 +40,8 @@ public:
         vk::ImageView input;
         vk::Rect2D area;
         std::optional<vk::Rect2D> clip;
+        /// Scale XY and offset XY into the input texture (packed stereo uses half its width).
+        std::array<float, 4> source_uv{1.0f, 1.0f, 0.0f, 0.0f};
     };
 
     // Frame marker: a row of black and white blocks stamped along the top-left edge of a frame.

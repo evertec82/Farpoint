@@ -946,6 +946,11 @@ DeviceState Runtime::GetHead() {
     return head;
 }
 
+DeviceState Runtime::GetTrackedPad() {
+    std::scoped_lock lock{mutex};
+    return pad_position_tracked && pad.sequence != 0 ? pad : DeviceState{};
+}
+
 DeviceState Runtime::GetPad() {
     std::scoped_lock lock{mutex};
     if (pad.sequence != 0 && pad_position_tracked) {

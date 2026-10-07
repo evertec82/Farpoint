@@ -23,6 +23,9 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     RegisterlibSceLibcInternalMemory(sym);
     RegisterlibSceLibcInternalIo(sym);
     RegisterlibSceLibcInternalThreads(sym);
+    // Native Windows also needs C++ static guards when the firmware libc is absent.
+    // Returning zero from an unresolved acquire skips singleton construction (Farpoint NP toolkit).
+    RegisterFexLibcCxaAliases(sym);
 }
 
 void ForceRegisterLib(Core::Loader::SymbolsResolver* sym) {

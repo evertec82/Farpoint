@@ -3,6 +3,8 @@
 
 #include <atomic>
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
 
 #include "common/logging/log.h"
 #include "core/aerolib/aerolib.h"
@@ -85,6 +87,14 @@ u64 GetStub(const char* nid) {
     if (std::strcmp(nid, "kBwCPsYX-m4") == 0) {
         return reinterpret_cast<u64>(&Libraries::Kernel::sceKernelFstat);
     }
+    // Relocating another module often resolves the same missing import again. Reuse the
+    // named slot instead of exhausting the table and losing the identity of the failing call.
+    static std::mutex mutex;
+    static std::unordered_map<std::string, u64> cached;
+    std::scoped_lock lock{mutex};
+    if (const auto found = cached.find(nid); found != cached.end()) {
+        return found->second;
+    }
     if (UsedStubEntries >= MAX_STUBS) {
         return (u64)&UnknownStub;
     }
@@ -96,7 +106,9 @@ u64 GetStub(const char* nid) {
         stub_nids[UsedStubEntries] = entry;
     }
 
-    return (u64)stub_handlers[UsedStubEntries++];
+    const u64 address = reinterpret_cast<u64>(stub_handlers[UsedStubEntries++]);
+    cached.emplace(nid, address);
+    return address;
 }
 
 } // namespace Core::AeroLib

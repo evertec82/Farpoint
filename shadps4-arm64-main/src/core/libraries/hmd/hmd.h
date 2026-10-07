@@ -114,7 +114,18 @@ struct OrbisHmdReprojectionTrackerState {
 };
 
 // Reprojection
-s32 PS4_SYSV_ABI sceHmdReprojectionStartMultilayer();
+// Farpoint 1.00 color-layer prefix, recovered from its runtime submissions.
+// Depth textures are optional. Additional layer fields are not consumed by this prototype.
+struct OrbisHmdReprojectionColorLayer {
+    const void* texture[2];
+    const void* depth_texture[2];
+    const void* sampler;
+    OrbisHmdReprojectionEyeUv uv[2];
+};
+static_assert(sizeof(OrbisHmdReprojectionColorLayer) == 72);
+s32 PS4_SYSV_ABI sceHmdReprojectionStartMultilayer(
+    const OrbisHmdReprojectionColorLayer* layers, u32 layer_count, const void* common,
+    const OrbisHmdReprojectionTrackerState* tracker_state, s64 flip_arg, s32 option);
 s32 PS4_SYSV_ABI sceHmdReprojectionAddDisplayBuffer();
 s32 PS4_SYSV_ABI sceHmdReprojectionClearUserEventEnd();
 s32 PS4_SYSV_ABI sceHmdReprojectionClearUserEventStart();

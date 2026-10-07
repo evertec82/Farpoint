@@ -12,7 +12,6 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/thread.h"
-#include "platform/bachata/runtime_client.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/known_title.h"
@@ -21,6 +20,7 @@
 #include "core/libraries/videoout/driver.h"
 #include "core/libraries/videoout/videoout_error.h"
 #include "imgui/renderer/imgui_core.h"
+#include "platform/bachata/runtime_client.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -517,7 +517,7 @@ void VideoOutDriver::SubmitHmdFrameInternal(VideoOutPort* port, const HmdFrame& 
     u32 eye_height = 0;
     const Vulkan::HmdFrames frames =
         presenter->PrepareHmdFrame(hmd_frame.eye_textures, hmd_frame.fov, frame_id, eye_width,
-                                   eye_height);
+                                   eye_height, hmd_frame.packed_stereo);
     if (!frames) {
         // Same as regular flips: retry once the current graphics task yields.
         liverpool->EnqueueCommand([=, this] {

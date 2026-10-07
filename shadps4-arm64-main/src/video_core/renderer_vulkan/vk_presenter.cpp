@@ -11,6 +11,7 @@
 #include "core/emulator_settings.h"
 #include "core/libraries/system/systemservice.h"
 #include "core/vr/spectator_view.h"
+#include "core/vr/stereo_layout.h"
 #ifdef ENABLE_OPENXR_HOST
 #include "core/vr/openxr_host.h"
 #endif
@@ -18,10 +19,10 @@
 #include "imgui/renderer/imgui_core.h"
 #include "imgui/renderer/imgui_impl_vulkan.h"
 #include "sdl_window.h"
-#include "video_core/buffer_cache/buffer.h"
-#include "video_core/renderdoc.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/stall_log.h"
+#include "video_core/buffer_cache/buffer.h"
+#include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -29,7 +30,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -848,8 +848,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 }
 
 HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textures,
-                                    const Core::Vr::Fov& fov, u32 frame_id,
-                                    u32& eye_width, u32& eye_height) {
+                                     const Core::Vr::Fov& fov, u32 frame_id, u32& eye_width,
+                                     u32& eye_height, bool packed_stereo) {
     // The guest hands the eyes over as plain textures; they were rendered as color targets, so
     // the cache already holds their contents.
     std::array<VideoCore::TextureCache::ImageDesc, 2> descs;
@@ -893,7 +893,7 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
     ++logged_frames;
 
     const auto& left_info = texture_cache.GetImage(image_ids[0]).info;
-    eye_width = left_info.size.width;
+    eye_width = packed_stereo ? left_info.size.width / 2 : left_info.size.width;
     eye_height = left_info.size.height;
 
     // With a VR host attached the frame goes into one of its buffers instead of the window. A
@@ -983,6 +983,7 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
                     .offset{.x = static_cast<s32>(eye * half_width), .y = 0},
                     .extent{.width = half_width, .height = target.height},
                 },
+                .source_uv = Core::Vr::EyeSourceUv(packed_stereo, eye),
             };
         }
         return regions;
@@ -1014,11 +1015,13 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
                                 .y = content.offset.y},
                         .extent{.width = region.width, .height = content.extent.height},
                     },
-                    .clip = vk::Rect2D{
-                        .offset{.x = content.offset.x + static_cast<s32>(region.clip_x),
-                                .y = clip.offset.y},
-                        .extent{.width = region.clip_width, .height = clip.extent.height},
-                    },
+                    .clip =
+                        vk::Rect2D{
+                            .offset{.x = content.offset.x + static_cast<s32>(region.clip_x),
+                                    .y = clip.offset.y},
+                            .extent{.width = region.clip_width, .height = clip.extent.height},
+                        },
+                    .source_uv = Core::Vr::EyeSourceUv(packed_stereo, eye),
                 };
             };
             const std::array regions{region_for(0), region_for(1)};
@@ -1026,8 +1029,11 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
             pp_pass.Render(cmdbuf, std::span{regions}.first(count), *frame, hmd_settings);
         } else if (spectator) {
             const std::array regions{
-                HostPasses::PostProcessingPass::Region{
-                    .input = eye_views[0], .area = content, .clip = clip},
+                HostPasses::PostProcessingPass::Region{.input = eye_views[0],
+                                                       .area = content,
+                                                       .clip = clip,
+                                                       .source_uv =
+                                                           Core::Vr::EyeSourceUv(packed_stereo, 0)},
             };
             pp_pass.Render(cmdbuf, regions, *frame, hmd_settings);
         } else {

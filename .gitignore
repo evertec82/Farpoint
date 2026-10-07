@@ -47,3 +47,7 @@ eboot.bin
 sce_sys/
 sce_module/
 savedata/
+
+!/README-FARPOINT.md
+!/Play Farpoint.bat
+!/pc-vr/launch-farpoint.ps1

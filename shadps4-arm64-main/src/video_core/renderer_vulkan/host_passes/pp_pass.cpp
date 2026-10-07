@@ -269,6 +269,9 @@ void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, std::span<const Region
     cmdbuf.beginRendering(rendering_info);
     for (size_t i = 0; i < regions.size(); ++i) {
         const Region& region = regions[i];
+        settings.source_uv = region.source_uv;
+        cmdbuf.pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eFragment, 0,
+                             sizeof(Settings), &settings);
         cmdbuf.setViewport(0, vk::Viewport{
                                   .x = static_cast<float>(region.area.offset.x),
                                   .y = static_cast<float>(region.area.offset.y),

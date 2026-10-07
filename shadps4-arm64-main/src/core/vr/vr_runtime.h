@@ -271,6 +271,8 @@ public:
     // Guest side, tracker space.
     DeviceState GetHead();
     DeviceState GetPad();
+    /// Only a position tracked by the host; never synthesize a weapon pose from the head.
+    DeviceState GetTrackedPad();
 
     /// Converts a tracker-space pose handed back by the guest into host space.
     Pose ToHostSpace(const Pose& tracker_pose) const;

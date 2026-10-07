@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#include <cmath>
 #include <mutex>
+#include "common/elf_info.h"
+#include "core/vr/stereo_layout.h"
 
 #include "common/logging/log.h"
 #include "core/guest_cpu/guest_watchdog.h"
@@ -75,9 +78,49 @@ void OnVblank() {
     end_event.Trigger();
 }
 
-s32 PS4_SYSV_ABI sceHmdReprojectionStartMultilayer() {
-    LOG_ERROR(Lib_Hmd, "(STUBBED) called");
-    return ORBIS_OK;
+s32 PS4_SYSV_ABI sceHmdReprojectionStartMultilayer(
+    const OrbisHmdReprojectionColorLayer* layers, u32 layer_count, const void* common,
+    const OrbisHmdReprojectionTrackerState* tracker_state, s64 flip_arg, s32 option) {
+    if (!layers || !tracker_state)
+        return ORBIS_HMD_ERROR_PARAMETER_NULL;
+    if (Common::ElfInfo::Instance().GameSerial() != "CUSA04508" || layer_count != 1) {
+        static bool reported = false;
+        if (!reported) {
+            LOG_ERROR(Lib_Hmd,
+                      "Unsupported multilayer submission: {} layers; Farpoint prototype supports "
+                      "one color layer",
+                      layer_count);
+            reported = true;
+        }
+        return ORBIS_HMD_ERROR_PARAMETER_INVALID;
+    }
+    OrbisHmdReprojectionParam param{};
+    param.texture[0] = layers->texture[0];
+    param.texture[1] = layers->texture[1];
+    param.sampler = layers->sampler;
+    std::copy_n(layers->uv, 2, param.uv);
+    const auto& uv = param.uv[0];
+    // The loading screen initially submits a black placeholder with an unset projection.
+    // Supply finite PSVR bounds for that frame rather than propagating NaN/Inf to OpenXR.
+    if (!std::isfinite(uv.scale_x) || !std::isfinite(uv.scale_y) || !std::isfinite(uv.offset_x) ||
+        !std::isfinite(uv.offset_y) || uv.scale_x <= 0.0f || uv.scale_y <= 0.0f) {
+        const auto fov = Core::Vr::Runtime::Instance().TitleFov();
+        param.uv[0] = {1.0f / (fov.tan_out + fov.tan_in), 1.0f / (fov.tan_top + fov.tan_bottom),
+                       fov.tan_out / (fov.tan_out + fov.tan_in),
+                       fov.tan_top / (fov.tan_top + fov.tan_bottom)};
+        param.uv[1] = param.uv[0];
+        param.uv[1].offset_x = 1.0f - param.uv[0].offset_x;
+    }
+    auto tracker = *tracker_state;
+    const float length = tracker.orientation[0] * tracker.orientation[0] +
+                         tracker.orientation[1] * tracker.orientation[1] +
+                         tracker.orientation[2] * tracker.orientation[2] +
+                         tracker.orientation[3] * tracker.orientation[3];
+    if (!std::isfinite(length) || length < 1e-6f) {
+        tracker.orientation[0] = tracker.orientation[1] = tracker.orientation[2] = 0;
+        tracker.orientation[3] = 1;
+    }
+    return sceHmdReprojectionStart(&param, &tracker, flip_arg, option);
 }
 
 s32 PS4_SYSV_ABI sceHmdReprojectionAddDisplayBuffer() {
@@ -209,7 +252,18 @@ s32 PS4_SYSV_ABI sceHmdReprojectionStart(const OrbisHmdReprojectionParam* param,
     Libraries::VideoOut::HmdFrame frame{};
     std::memcpy(&frame.eye_textures[0], param->texture[0], sizeof(AmdGpu::Image));
     std::memcpy(&frame.eye_textures[1], param->texture[1], sizeof(AmdGpu::Image));
-    frame.fov = FovFromUv(param->uv[0]);
+    auto left_uv = param->uv[0];
+    frame.packed_stereo = Common::ElfInfo::Instance().GameSerial() == "CUSA04508" &&
+                          frame.eye_textures[0].Address() == frame.eye_textures[1].Address() &&
+                          frame.eye_textures[0].width > 0;
+    if (frame.packed_stereo) {
+        // Farpoint's UV transform addresses the full side-by-side texture. Recover the
+        // projection in coordinates of the left half before computing the eye's FOV.
+        const auto unpacked = Core::Vr::LeftEyeProjectionUv(
+            {left_uv.scale_x, left_uv.scale_y, left_uv.offset_x, left_uv.offset_y}, true);
+        left_uv = {unpacked[0], unpacked[1], unpacked[2], unpacked[3]};
+    }
+    frame.fov = FovFromUv(left_uv);
     frame.render_pose = {
         .position{tracker_state->position[0], tracker_state->position[1],
                   tracker_state->position[2]},

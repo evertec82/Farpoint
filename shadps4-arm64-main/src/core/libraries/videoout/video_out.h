@@ -146,7 +146,8 @@ s32 PS4_SYSV_ABI sceVideoOutAdjustColor(s32 handle, const SceVideoOutColorSettin
 /// One stereo frame handed to the headset by the HMD reprojection.
 struct HmdFrame {
     std::array<AmdGpu::Image, 2> eye_textures; ///< Guest texture descriptors, left then right.
-    Core::Vr::Fov fov;                         ///< Field of view the eyes were rendered with.
+    bool packed_stereo{}; ///< Both eyes occupy horizontal halves of the same image.
+    Core::Vr::Fov fov;    ///< Field of view the eyes were rendered with.
     /// Head pose used for rendering: in tracker space as the title hands it in, in the host's
     /// space once the frame is on its way to the display.
     Core::Vr::Pose render_pose;

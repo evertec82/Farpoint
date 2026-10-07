@@ -1,12 +1,15 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <map>
 #include <core/libraries/np/np_error.h>
 #include <core/libraries/np/np_handler.h>
+#include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "core/libraries/error_codes.h"
 #include "core/libraries/libs.h"
+#include "core/user_settings.h"
 #include "np_score.h"
 #include "np_score_ctx.h"
 
@@ -82,7 +85,14 @@ s32 PS4_SYSV_ABI sceNpScoreCreateNpTitleCtx(OrbisNpServiceLabel serviceLabel,
 s32 PS4_SYSV_ABI sceNpScoreCreateNpTitleCtxA(OrbisNpServiceLabel npServiceLabel,
                                              UserService::OrbisUserServiceUserId selfId) {
 
-    if (!Libraries::Np::NpHandler::GetInstance().IsPsnSignedIn(selfId)) {
+    // Farpoint 1.00 constructs its leaderboard context unconditionally and fatals on
+    // signed-out status before single-player starts. Allow a local context for a valid
+    // local user, while actual network requests retain their offline error behavior.
+    const char* offline_option = std::getenv("SHADPS4_FARPOINT_OFFLINE_SCORE");
+    const bool offline_farpoint = Common::ElfInfo::Instance().GameSerial() == "CUSA04508" &&
+                                  UserManagement.GetUserByID(selfId) != nullptr &&
+                                  !(offline_option && std::string_view{offline_option} == "0");
+    if (!offline_farpoint && !Libraries::Np::NpHandler::GetInstance().IsPsnSignedIn(selfId)) {
         LOG_ERROR(Lib_NpScore, "userId {} is not signed in to NP", selfId);
         return ORBIS_NP_ERROR_SIGNED_OUT;
     }
@@ -94,6 +104,11 @@ s32 PS4_SYSV_ABI sceNpScoreCreateNpTitleCtxA(OrbisNpServiceLabel npServiceLabel,
     if (static_cast<s32>(g_title_ctxs.size()) >= ORBIS_NP_SCORE_MAX_CTX_NUM) {
         LOG_ERROR(Lib_NpScore, "Too many title contexts already exist ({})", g_title_ctxs.size());
         return ORBIS_NP_COMMUNITY_ERROR_TOO_MANY_OBJECTS;
+    }
+    if (offline_farpoint) {
+        LOG_INFO(Lib_NpScore,
+                 "Farpoint: creating an offline-only leaderboard context for local user {}",
+                 selfId);
     }
     const OrbisNpScoreTitleCtxId id = g_next_ctx_id++;
     g_title_ctxs[id] = ScoreTitleCtx{.serviceLabel = npServiceLabel, .userId = selfId};
