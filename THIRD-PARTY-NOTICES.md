@@ -16,10 +16,14 @@ Packed fragment-export handling adapts artemkaVG's upstream shadPS4 proposal htt
 
 The emulator requires the Microsoft Visual C++ runtime, which is not included: https://aka.ms/vs/17/release/vc_redist.x64.exe.
 
+## Package extraction
+
+PkgTool and LibOrbisPkg 0.2.231 by Maxton are bundled unchanged under LGPL-3.0. Their license and source information are included in `pc-vr/pkgtool/`. Source: https://github.com/maxton/LibOrbisPkg (release v0.2).
+
 ## Corresponding source
 
 Emulator and launcher source is available at each release tag. Exact dependency revisions and upstream URLs are recorded in .gitmodules and the submodule entries. The inherited offer to provide the corresponding source of GPL/LGPL components on request for three years from each release remains applicable; open an issue in this repository.
 
 ## Not included
 
-No game package, game executable, extracted configuration pack, game shader, save data, PlayStation system software or console key is included in this repository or its releases. The Windows update does not include a Quest/Android application, Linux runtime or package-extraction tool.
+No game package, game executable, extracted configuration pack, game shader, save data, PlayStation system software or console key is included in this repository or its releases. The Windows distribution does not include a Quest/Android application or Linux runtime.

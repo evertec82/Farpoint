@@ -34,7 +34,7 @@ if (-not $NoGui -and -not $ValidateOnly) {
     $label.Text = 'Farpoint 1.00 (CUSA04508). Gameplay and weapon tracking need headset testing.'
     $label.SetBounds(18,16,585,38); $form.Controls.Add($label)
     $pathLabel = New-Object System.Windows.Forms.Label
-    $pathLabel.Text = 'Extracted eboot.bin'; $pathLabel.SetBounds(18,60,560,20); $form.Controls.Add($pathLabel)
+    $pathLabel.Text = 'Game path (leave default to extract Farpoint.pkg beside the launcher)'; $pathLabel.SetBounds(18,60,560,20); $form.Controls.Add($pathLabel)
     $pathBox = New-Object System.Windows.Forms.TextBox
     $pathBox.Text = $GamePath; $pathBox.SetBounds(18,83,490,24); $form.Controls.Add($pathBox)
     $browse = New-Object System.Windows.Forms.Button
@@ -85,7 +85,7 @@ if (-not $NoGui -and -not $ValidateOnly) {
     $form.Dispose()
 }
 if (-not (Test-Path -LiteralPath $exe)) { throw "Missing emulator: $exe" }
-if (-not (Test-Path -LiteralPath $GamePath)) { throw "Missing extracted game: $GamePath" }
+& (Join-Path $PSScriptRoot 'initialize-farpoint.ps1') -GamePath $GamePath
 $GamePath = (Resolve-Path -LiteralPath $GamePath).Path
 if ([IO.Path]::GetFileName($GamePath) -ne 'eboot.bin') { throw 'Select the extracted Farpoint eboot.bin.' }
 # Reject a different executable rather than applying the prototype ABI to another game/version.

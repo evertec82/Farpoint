@@ -37,3 +37,7 @@ savedata/
 !/README-FARPOINT.md
 !/Play Farpoint.bat
 !/pc-vr/launch-farpoint.ps1
+
+!/pc-vr/initialize-farpoint.ps1
+!/pc-vr/FarpointProfiles.cs
+!/pc-vr/config-default.json

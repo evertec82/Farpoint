@@ -2,15 +2,39 @@
 
 Farpoint CUSA04508 version 1.00 running through AstroQuest's shadPS4/OpenXR host on Windows. This is a development port, with known rendering defects and incomplete campaign validation.
 
-## Install this update
+## First-time installation
 
-The release ZIP is an **update for an existing Farpoint PC VR installation**, not a complete game installer. Close the emulator, back up your installation, then extract the ZIP into its root so `pc-vr/shadps4.exe` and `pc-vr/launch-farpoint.ps1` replace the existing files. Open `Play Farpoint.bat`.
+1. Extract the release ZIP into a writable folder, for example `D:\Farpoint`.
+2. Place your own **Farpoint CUSA04508 version 1.00 package** in that folder and name it **`Farpoint.pkg`**, beside **`Play Farpoint.bat`** (not inside `pc-vr`).
+3. Connect your VR headset and activate its OpenXR runtime, such as SteamVR or Virtual Desktop's VDXR.
+4. Open **`Play Farpoint.bat`**, choose your resolution and controller options, leave the default game path selected, and click Start Farpoint. The first launch extracts the package, creates the emulator settings and generates the resolution profiles from your game. Leave the console open until extraction finishes.
 
-You must supply your own extracted game at `games/CUSA04508/files/uroot/eboot.bin`, existing `pc-vr/user/config.json`, and locally generated resolution profiles in `pc-vr/resolution-profiles/`. These packs contain configuration extracted from the game and are deliberately not distributed. An installation lacking them cannot launch with this update. Saves and emulator settings are not included or overwritten by the archive.
+Example folder layout before the first launch:
+
+```text
+D:\Farpoint\
+  Farpoint.pkg       <-- your game package goes here
+  Play Farpoint.bat  <-- open this
+  pc-vr\
+    shadps4.exe
+    launch-farpoint.ps1
+    initialize-farpoint.ps1
+    FarpointProfiles.cs
+    config-default.json
+    pkgtool\
+      PkgTool.exe
+      LibOrbisPkg.dll
+```
+
+Alternatively, supply an already extracted game with its complete directory structure at `games/CUSA04508/files/uroot/eboot.bin`, or use Browse to select that executable elsewhere. Do not copy only `eboot.bin`; the entire extracted game is required.
+
+Requires 64-bit Windows, a Vulkan-capable GPU, an OpenXR headset/runtime, Windows PowerShell, and the [Microsoft Visual C++ x64 runtime](https://aka.ms/vs/17/release/vc_redist.x64.exe). Allow disk space for both the package and extracted game. Package extraction supports the compatible zero-passcode package format; unsupported packages are rejected. No game files are provided. Existing settings are preserved.
+
+The ZIP includes the emulator, launcher, setup code, default configuration, package-extraction tool and licenses. Resolution packs are generated locally from your game on first launch, so no separate profile download is needed.
 
 Supported game executable SHA-256: `92A21FF9E309CE5DD58B058C4B12329463697BB27FDA98B5DA353E0A73BD9C0F`.
 
-## Current changes
+## Features
 
 - Correct packed stereo submission and per-eye sampling for OpenXR, including SteamVR.
 - Fix tracker initialization and controller routing; tracked Aim and gamepad modes are available.
