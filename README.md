@@ -11,4 +11,3 @@ Current work includes corrected lighting, tracked controllers, SteamVR/OpenXR su
 **This is a development port.** Rainbow textures, stretched geometry and intermittent crashes remain under investigation. The downloadable ZIP updates an existing Farpoint PC VR installation; it does not include the game, extracted configuration packs, saves or a complete first-time installer.
 
 This repository preserves the upstream AstroQuest/shadPS4 source history and attribution. Farpoint changes are on `main`. Shared emulator code and upstream license notices are retained because the Farpoint build depends on them.
-
