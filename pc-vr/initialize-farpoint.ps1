@@ -1,6 +1,7 @@
 param([Parameter(Mandatory=$true)][string]$GamePath)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
+$package=Join-Path $root 'Farpoint.pkg'
 if (-not (Test-Path -LiteralPath $GamePath)) {
     $package=Join-Path $root 'Farpoint.pkg'
     $defaultGame=Join-Path $root 'games/CUSA04508/files/uroot/eboot.bin'
@@ -19,6 +20,7 @@ if (-not (Test-Path -LiteralPath $GamePath)) {
     Move-Item -LiteralPath $staging -Destination $target
 }
 if ((Get-FileHash -LiteralPath $GamePath).Hash -ne '92A21FF9E309CE5DD58B058C4B12329463697BB27FDA98B5DA353E0A73BD9C0F') { throw 'Only Farpoint CUSA04508 version 1.00 is supported.' }
+& (Join-Path $PSScriptRoot 'initialize-metadata.ps1') -GamePath $GamePath -Package $package
 $profiles=Join-Path $PSScriptRoot 'resolution-profiles'
 $missing=@(960,1536,1920,2160,2400,2688,3072) | Where-Object { -not (Test-Path (Join-Path $profiles "eye-$_.pak")) }
 if ($missing) {

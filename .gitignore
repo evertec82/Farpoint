@@ -41,3 +41,4 @@ savedata/
 !/pc-vr/initialize-farpoint.ps1
 !/pc-vr/FarpointProfiles.cs
 !/pc-vr/config-default.json
+!/pc-vr/initialize-metadata.ps1

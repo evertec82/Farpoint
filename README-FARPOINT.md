@@ -19,6 +19,7 @@ D:\Farpoint\
     shadps4.exe
     launch-farpoint.ps1
     initialize-farpoint.ps1
+    initialize-metadata.ps1
     FarpointProfiles.cs
     config-default.json
     pkgtool\
@@ -31,6 +32,8 @@ Alternatively, supply an already extracted game with its complete directory stru
 Requires 64-bit Windows, a Vulkan-capable GPU, an OpenXR headset/runtime, Windows PowerShell, and the [Microsoft Visual C++ x64 runtime](https://aka.ms/vs/17/release/vc_redist.x64.exe). Allow disk space for both the package and extracted game. Package extraction supports the compatible zero-passcode package format; unsupported packages are rejected. No game files are provided. Existing settings are preserved.
 
 The ZIP includes the emulator, launcher, setup code, default configuration, package-extraction tool and licenses. Resolution packs are generated locally from your game on first launch, so no separate profile download is needed.
+
+If startup reports missing `sce_sys/param.sfo`, put the original `Farpoint.pkg` beside the launcher and start again. Setup restores the package metadata before booting. Renaming a region folder does not change game compatibility; the executable and metadata must match the supported edition.
 
 Supported game executable SHA-256: `92A21FF9E309CE5DD58B058C4B12329463697BB27FDA98B5DA353E0A73BD9C0F`.
 
