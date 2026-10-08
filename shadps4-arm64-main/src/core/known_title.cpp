@@ -870,6 +870,16 @@ void OnFrameSubmitted() {
 }
 
 u32 FramePace() {
+    // Farpoint does not run Astro Bot's governor hook. Its default two-vblank
+    // frame wait otherwise limits it to half the host refresh rate.
+    if (Common::ElfInfo::Instance().GameSerial() == "CUSA04508") {
+        static const u32 farpoint_pace = [] {
+            const u32 pace = static_cast<u32>(std::max(GetSettings().pace, 1));
+            LOG_INFO(Core, "Farpoint frame pacing: {} host refresh(es) per game frame", pace);
+            return pace;
+        }();
+        return farpoint_pace;
+    }
     return frame_pace.load(std::memory_order_relaxed);
 }
 

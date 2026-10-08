@@ -3,6 +3,8 @@
 
 #include <xxhash.h>
 
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <unordered_set>
@@ -15,6 +17,7 @@
 #include "common/div_ceil.h"
 #include "common/logging/log.h"
 #include "common/scope_exit.h"
+#include "common/path_util.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -32,6 +35,18 @@ namespace VideoCore {
 static constexpr u64 PageShift = 12;
 static constexpr u64 NumFramesBeforeRemoval = 32;
 static constexpr std::size_t MaxViewDimensionMismatchRecords = 64;
+
+// Farpoint reads its reduced sky brightness back through a tiled, single-pixel
+// FP16 target. The general linear-image readback option does not cover this.
+// With no bank swizzle, pixel (0,0) occupies the first eight guest bytes; do not
+// overwrite the unused macro-tile padding or apply this to other tiled images.
+static bool IsFarpointBrightnessReadback(const ImageInfo& info) {
+    return Common::ElfInfo::Instance().GameSerial() == "CUSA04508" &&
+           info.guest_address != 0 && info.size.width == 1 && info.size.height == 1 &&
+           info.size.depth == 1 && info.resources.layers == 1 && info.resources.levels == 1 &&
+           info.num_samples == 1 && info.bank_swizzle == 0 &&
+           info.pixel_format == vk::Format::eR16G16B16A16Sfloat;
+}
 
 static void LogViewDimensionMismatch(const TextureCache::ImageDesc& desc, const Image& image) {
     if (IsViewTypeCompatible(desc.view_info.type, image.info.type)) {
@@ -165,6 +180,19 @@ ImageId TextureCache::GetNullImage(const vk::Format format) {
     return null_id;
 }
 
+void TextureCache::CompleteBrightnessReadbacks() {
+    for (auto it = download_images.begin(); it != download_images.end();) {
+        const ImageId image_id = *it;
+        if (!IsFarpointBrightnessReadback(slot_images[image_id].info)) {
+            ++it;
+            continue;
+        }
+        it = download_images.erase(it);
+        DownloadImageMemory(image_id);
+        LOG_INFO(Render_Vulkan, "Farpoint brightness readback completed before guest EOP");
+    }
+}
+
 void TextureCache::ProcessDownloadImages() {
     for (const ImageId image_id : download_images) {
         DownloadImageMemory(image_id);
@@ -178,15 +206,16 @@ void TextureCache::DownloadImageMemory(ImageId image_id) {
         return;
     }
     auto& download_buffer = buffer_cache.GetUtilityBuffer(MemoryUsage::Download);
-    const u32 download_size = image.info.pitch * image.info.size.height *
+    const bool scalar_brightness = IsFarpointBrightnessReadback(image.info);
+    const u32 download_size = scalar_brightness ? 8u : image.info.pitch * image.info.size.height *
                               image.info.resources.layers * (image.info.num_bits / 8);
     ASSERT(download_size <= image.info.guest_size);
     const auto [download, offset] = download_buffer.Map(download_size);
     download_buffer.Commit();
     const vk::BufferImageCopy image_download = {
         .bufferOffset = offset,
-        .bufferRowLength = image.info.pitch,
-        .bufferImageHeight = image.info.size.height,
+        .bufferRowLength = scalar_brightness ? 0u : image.info.pitch,
+        .bufferImageHeight = scalar_brightness ? 0u : image.info.size.height,
         .imageSubresource =
             {
                 .aspectMask = image.info.props.is_depth ? vk::ImageAspectFlagBits::eDepth
@@ -204,10 +233,30 @@ void TextureCache::DownloadImageMemory(ImageId image_id) {
     cmdbuf.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
                              download_buffer.Handle(), image_download);
 
+    if (scalar_brightness) {
+        // This guest CPU readback must finish before submission processing
+        // continues, rather than racing a background completion callback.
+        const VAddr device_addr = image.info.guest_address;
+        scheduler.Finish();
+        const bool written = Core::Memory::Instance()->TryWriteBacking(
+            std::bit_cast<u8*>(device_addr), download, download_size);
+        u64 bits{};
+        std::memcpy(&bits, download, sizeof(bits));
+        LOG_INFO(Render_Vulkan,
+                 "Farpoint synchronous brightness readback at {:#x}: {:016x}, written={}",
+                 device_addr, bits, written);
+        return;
+    }
     scheduler.DeferPriorityOperation(
-        [this, device_addr = image.info.guest_address, download, download_size] {
+        [this, device_addr = image.info.guest_address, download, download_size, scalar_brightness] {
             Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr), download,
                                                       download_size);
+            if (scalar_brightness) {
+                u64 bits{};
+                std::memcpy(&bits, download, sizeof(bits));
+                LOG_INFO(Render_Vulkan, "Farpoint brightness readback at {:#x}: {:016x}",
+                         device_addr, bits);
+            }
         });
 }
 
@@ -370,20 +419,25 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
 ImageId TextureCache::ResolveDimensionOverlap(const ImageInfo& requested_info,
                                               ImageId cache_image_id) {
     auto& cache_image = slot_images[cache_image_id];
-    // UE4 generates Farpoint's LUT through a 2D-array target, then samples it
-    // as a volume. Recreating either view must preserve the other backing's pixels.
+    // Farpoint uses array render targets for color grading and indirect lighting,
+    // then samples them as volumes. Preserve their authoritative GPU contents.
     const auto lut_volume = [](const ImageInfo& info) {
-        return info.props.is_volume && info.size.width == 32 && info.size.height == 32 &&
-               info.size.depth == 32 && info.resources.layers == 1;
+        return info.props.is_volume && (info.size.width == 16 || info.size.width == 32) &&
+               info.size.height == info.size.width && info.size.depth == info.size.width &&
+               info.resources.layers == 1;
     };
     const auto lut_array = [](const ImageInfo& info) {
-        return !info.props.is_volume && info.size.width == 32 && info.size.height == 32 &&
-               info.size.depth == 1 && info.resources.layers == 32;
+        return !info.props.is_volume && (info.size.width == 16 || info.size.width == 32) &&
+               info.size.height == info.size.width && info.size.depth == 1 &&
+               info.resources.layers == info.size.width;
     };
     if (Common::ElfInfo::Instance().GameSerial() == "CUSA04508" &&
         ((lut_volume(requested_info) && lut_array(cache_image.info)) ||
          (lut_array(requested_info) && lut_volume(cache_image.info))) &&
-        requested_info.pixel_format == vk::Format::eA2B10G10R10UnormPack32 &&
+        requested_info.size.width == cache_image.info.size.width &&
+        ((requested_info.size.width == 32 &&
+          requested_info.pixel_format == vk::Format::eA2B10G10R10UnormPack32) ||
+         requested_info.pixel_format == vk::Format::eR16G16B16A16Sfloat) &&
         requested_info.pixel_format == cache_image.info.pixel_format &&
         requested_info.resources.levels == 1 && cache_image.info.resources.levels == 1 &&
         requested_info.num_samples == 1 && cache_image.info.num_samples == 1) {
@@ -401,10 +455,12 @@ ImageId TextureCache::ResolveDimensionOverlap(const ImageInfo& requested_info,
             source.binding.needs_rebind = 1u;
         }
         FreeImage(cache_image_id);
-        static bool reported = false;
-        if (!reported) {
-            reported = true;
-            LOG_INFO(Render_Vulkan, "Farpoint color LUT: preserve pixels across array/volume views");
+        static u32 reported = 0;
+        if (reported++ < 8) {
+            LOG_INFO(Render_Vulkan, "Farpoint volume preservation: {}x{}x{} {} at {:#x}",
+                     requested_info.size.width, requested_info.size.height,
+                     requested_info.size.width, vk::to_string(requested_info.pixel_format),
+                     requested_info.guest_address);
         }
         return new_id;
     }
@@ -822,12 +878,24 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         };
     }
 
+    // Overlap resolution can visit unrelated allocations after finding a parent,
+    // or expand that parent again. Resolve the original request against the final
+    // image: offsets returned for an intermediate merged image are not reliable.
+    view_mip = -1;
+    view_slice = -1;
+    if (const auto mip = info.MipOf(image.info); mip >= 0) {
+        if (const auto slice = info.SliceOf(image.info, mip); slice >= 0) {
+            view_mip = mip;
+            view_slice = slice;
+        }
+    }
+
     // If the image requested is a subresource of the image from cache record its location.
     if (view_mip > 0) {
-        desc.view_info.range.base.level = view_mip;
+        desc.view_info.range.base.level += view_mip;
     }
     if (view_slice > 0) {
-        desc.view_info.range.base.layer = view_slice;
+        desc.view_info.range.base.layer += view_slice;
     }
 
     return image_id;
@@ -879,7 +947,8 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
-    if (readback_linear_images && !image.info.props.is_tiled) {
+    if ((readback_linear_images && !image.info.props.is_tiled) ||
+        IsFarpointBrightnessReadback(image.info)) {
         download_images.emplace(image_id);
     }
     image.usage.render_target = 1u;
@@ -1032,6 +1101,29 @@ void TextureCache::RefreshImage(Image& image) {
         });
     }
 
+    // Opt-in paired snapshots for streamed BC texture corruption. Capture the
+    // actual upload buffer before conversion; guest memory may be recycled later.
+    static u32 upload_capture_count = 0;
+    std::unique_ptr<Buffer> upload_capture;
+    std::vector<u8> guest_capture;
+    const auto capture_root = Common::FS::GetUserPath(Common::FS::PathType::UserDir) /
+                              "texture_uploads";
+    const bool capture_candidate = image.info.props.is_block &&
+        image.info.size.width == 512 && image.info.size.height == 512 &&
+        image.info.resources.layers == 1 && image.info.resources.levels > 1 &&
+        image.info.guest_size <= 0x80000;
+    if (capture_candidate && upload_capture_count < 256 &&
+        Common::ElfInfo::Instance().GameSerial() == "CUSA04508" &&
+        std::filesystem::exists(capture_root / "enabled")) {
+        guest_capture.resize(image.info.guest_size);
+        Core::Memory::Instance()->CopySparseMemory(image.info.guest_address,
+                                                   guest_capture.data(), guest_capture.size());
+        upload_capture = std::make_unique<Buffer>(instance, scheduler, MemoryUsage::Download,
+            0, vk::BufferUsageFlagBits::eTransferDst, image.info.guest_size);
+        scheduler.CommandBuffer().copyBuffer(in_buffer->Handle(), upload_capture->Handle(),
+            vk::BufferCopy{in_offset, 0, image.info.guest_size});
+    }
+
     const auto [buffer, offset] =
         tile_manager.DetileImage(in_buffer->Handle(), in_offset, image.info);
     for (auto& copy : image_copies) {
@@ -1055,6 +1147,26 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     image.Upload(image_copies, buffer, offset);
+    if (upload_capture) {
+        // Finish only after the upload has consumed any temporary source buffers.
+        scheduler.Finish();
+        const auto stem = fmt::format("{:03}_{:x}", upload_capture_count++,
+                                      image.info.guest_address);
+        std::ofstream(capture_root / (stem + "_guest.bin"), std::ios::binary)
+            .write(reinterpret_cast<const char*>(guest_capture.data()), guest_capture.size());
+        std::ofstream(capture_root / (stem + "_source.bin"), std::ios::binary)
+            .write(reinterpret_cast<const char*>(upload_capture->mapped_data.data()),
+                   image.info.guest_size);
+        std::ofstream metadata(capture_root / (stem + "_layout.txt"));
+        metadata << vk::to_string(image.info.pixel_format) << " "
+                 << image.info.num_bits << " " << u32(image.info.tile_mode) << "\n";
+        for (u32 mip = 0; mip < image.info.resources.levels; ++mip) {
+            const auto& layout = image.info.mips_layout[mip];
+            metadata << mip << " " << layout.offset << " " << layout.size << " "
+                     << layout.pitch << " " << layout.height << "\n";
+        }
+        LOG_INFO(Render_Vulkan, "Captured paired texture upload {}", stem);
+    }
 }
 
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,

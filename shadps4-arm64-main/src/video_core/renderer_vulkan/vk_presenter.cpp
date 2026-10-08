@@ -38,6 +38,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <limits>
 #include <memory>
@@ -872,7 +873,9 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
             if (std::filesystem::exists(dump_flag, ec)) {
                 std::filesystem::remove(dump_flag, ec);
                 DumpGpuImages();
-                Rasterizer::StartDrawTrace(3000);
+                // Campaign scenes can exceed 3000 draw/dispatch operations before
+                // tonemapping. Keep a bounded trace long enough to include those passes.
+                Rasterizer::StartDrawTrace(30000);
             }
         }
     }
@@ -1108,7 +1111,8 @@ void Presenter::DumpGpuImages() {
                  vk::to_string(info.pixel_format), info.num_samples, info.resources.levels,
                  info.resources.layers, static_cast<u32>(image.flags),
                  info.props.is_depth ? ", depth" : "");
-        if (!(image.flags & VideoCore::ImageFlagBits::GpuModified) || info.props.is_depth ||
+        if (!(image.flags & VideoCore::ImageFlagBits::Registered) ||
+            !(image.flags & VideoCore::ImageFlagBits::GpuModified) || info.props.is_depth ||
             info.props.is_volume || info.size.width < 64 || info.size.height < 64) {
             return;
         }
@@ -1258,12 +1262,10 @@ void Presenter::DumpGpuImages() {
     // all its layers, raw (rt_dump/image_<address>_level<n>_<w>x<h>x<layers>_<format>.bin): for
     // what the pictures above leave out, textures the game only reads.
     const char* wanted_text = std::getenv("SHADPS4_DUMP_IMAGE");
-    if (wanted_text == nullptr) {
-        return;
-    }
+    // Always include small color-grading volumes in a requested diagnostic capture.
     // (Several addresses may be given, apart by commas.)
     std::vector<VAddr> wanted_list;
-    for (const char* at = wanted_text; *at != '\0';) {
+    for (const char* at = wanted_text; at != nullptr && *at != '\0';) {
         char* end = nullptr;
         wanted_list.push_back(std::strtoull(at, &end, 16));
         if (end == at) {
@@ -1271,15 +1273,46 @@ void Presenter::DumpGpuImages() {
         }
         at = *end == ',' ? end + 1 : end;
     }
+    // Read addresses again for each requested capture, so a diagnostic session can target
+    // sampled textures without restarting the game. Bound both the file read and image count.
+    if (std::ifstream requests{Common::FS::GetUserPath(Common::FS::PathType::UserDir) /
+                               "dump_images.txt"}; requests) {
+        std::array<char, 4096> contents{};
+        requests.read(contents.data(), contents.size());
+        std::istringstream addresses{std::string(contents.data(), requests.gcount())};
+        for (std::string token; wanted_list.size() < 32 && addresses >> token;) {
+            char* end = nullptr;
+            const auto address = std::strtoull(token.c_str(), &end, 16);
+            if (address != 0 && end != token.c_str() && *end == '\0' &&
+                std::ranges::find(wanted_list, address) == wanted_list.end()) {
+                wanted_list.push_back(address);
+            }
+        }
+    }
     std::vector<VideoCore::Image*> raw_images;
     texture_cache.ForEachImage([&](VideoCore::Image& image) {
-        if (std::ranges::find(wanted_list, image.info.guest_address) != wanted_list.end() &&
-            image.info.num_samples == 1) {
+        const auto& info = image.info;
+        const bool lut = (info.size.width == 16 || info.size.width == 32) &&
+            info.size.height == info.size.width &&
+            ((info.props.is_volume && info.size.depth == info.size.width) ||
+             info.resources.layers == info.size.width);
+        const bool diagnostic_hdr = std::getenv("SHADPS4_DIAG_CAPTURE_HDR") &&
+            ((info.size.width == 2688 && info.size.height == 1512) ||
+             ((info.size.width == 64 || info.size.width == 128) &&
+              info.size.height == info.size.width && info.resources.levels > 1)) &&
+            info.pixel_format == vk::Format::eR16G16B16A16Sfloat;
+        if ((lut || diagnostic_hdr || std::ranges::find(wanted_list, info.guest_address) != wanted_list.end()) &&
+            (image.flags & VideoCore::ImageFlagBits::Registered) && info.num_samples == 1 &&
+            !info.props.is_depth) {
             raw_images.push_back(&image);
         }
     });
     for (VideoCore::Image* image : raw_images) {
         const auto& info = image->info;
+        if (info.props.is_volume != (image->backing->image.image_ci.imageType == vk::ImageType::e3D)) {
+            LOG_WARNING(Render_Vulkan, "Skipping diagnostic image with mismatched backing type");
+            continue;
+        }
         const bool block = info.props.is_block;
         const u32 unit = info.num_bits / 8; // bytes a pixel, or a block of 4x4 for compressed
         for (u32 level = 0; level < info.resources.levels; ++level) {
@@ -1287,7 +1320,8 @@ void Presenter::DumpGpuImages() {
             const u32 h = std::max(info.size.height >> level, 1u);
             const u32 units_w = block ? (w + 3) / 4 : w;
             const u32 units_h = block ? (h + 3) / 4 : h;
-            const u64 bytes = u64{units_w} * units_h * unit * info.resources.layers;
+            const u32 depth = std::max(info.size.depth >> level, 1u);
+            const u64 bytes = u64{units_w} * units_h * unit * info.resources.layers * depth;
             VideoCore::Buffer buffer{instance,
                                      draw_scheduler,
                                      VideoCore::MemoryUsage::Download,
@@ -1311,15 +1345,15 @@ void Presenter::DumpGpuImages() {
                         .layerCount = info.resources.layers,
                     },
                 .imageOffset = {0, 0, 0},
-                .imageExtent = {w, h, 1},
+                .imageExtent = {w, h, depth},
             };
             cmdbuf.copyImageToBuffer(image->GetImage(), vk::ImageLayout::eTransferSrcOptimal,
                                      buffer.Handle(), region);
             draw_scheduler.Finish();
             const auto path =
-                dump_dir / fmt::format("image_{:x}_level{}_{}x{}x{}_{}.bin", info.guest_address,
-                                       level, w, h, info.resources.layers,
-                                       vk::to_string(info.pixel_format));
+                dump_dir / fmt::format("image_{:x}_level{}_{}x{}x{}_{}_type{}.bin", info.guest_address,
+                                       level, w, h, info.resources.layers * depth,
+                                       vk::to_string(info.pixel_format), static_cast<u32>(info.type));
             std::ofstream out{path, std::ios::binary};
             out.write(reinterpret_cast<const char*>(buffer.mapped_data.data()),
                       static_cast<std::streamsize>(bytes));
@@ -1339,6 +1373,7 @@ void Presenter::DumpGpuImages() {
                  info.guest_address, info.resources.levels, info.resources.layers,
                  static_cast<u32>(info.tile_mode), info.guest_size, static_cast<u32>(image->flags));
     }
+    std::ofstream{dump_dir / "capture_complete.txt"} << "complete\n";
 }
 
 Frame* Presenter::PrepareBlankFrame(bool present_thread) {

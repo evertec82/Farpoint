@@ -155,6 +155,13 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
             gpu_modified_ranges.Subtract(device_addr_out, range_size);
         });
     if (total_size_bytes == 0) {
+        // Page tracking can report GPU writes even when no exact modified byte
+        // range remains. Complete the state transition so CPU writes are still
+        // uploaded next time, rather than leaving stale cached buffer contents.
+        memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
+        if (is_write) {
+            memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+        }
         return;
     }
     const auto [download, offset] = download_buffer.Map(total_size_bytes);
@@ -166,10 +173,13 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
     scheduler.EndRendering();
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.copyBuffer(buffer.buffer, download_buffer.Handle(), copies);
-    const auto write_data = [&]() {
+    // GC queues this callback after this function returns. Own its inputs;
+    // references to local copies/offsets (or the buffer) would then be dangling.
+    const auto write_data = [this, copies, device_addr, size, is_write, download, offset,
+                             buffer_addr = buffer.CpuAddr()]() {
         auto* memory = Core::Memory::Instance();
         for (const auto& copy : copies) {
-            const VAddr copy_device_addr = buffer.CpuAddr() + copy.srcOffset;
+            const VAddr copy_device_addr = buffer_addr + copy.srcOffset;
             const u64 dst_offset = copy.dstOffset - offset;
             memory->TryWriteBacking(std::bit_cast<u8*>(copy_device_addr), download + dst_offset,
                                     copy.size);

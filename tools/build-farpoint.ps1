@@ -18,11 +18,11 @@ if ($Test) {
     New-Item -ItemType Directory -Force $testDir | Out-Null
     $sourceRoot = Join-Path $repoRoot 'shadps4-arm64-main'
     $testsRoot = Join-Path $repoRoot 'tools/tests'
-    & "$llvmBin/clang-cl.exe" /nologo /std:c++latest /MD /EHsc -fuse-ld=lld "/I$testsRoot/stubs" "/I$sourceRoot/src" "$testsRoot/farpoint_compat_test.cpp" "$sourceRoot/src/core/libraries/libc_internal/libc_internal_cxa.cpp" "/Fe:$testDir/farpoint_compat_test.exe" "/Fo:$testDir/"
+    & "$llvmBin/clang-cl.exe" /nologo /std:c++latest /MD /EHsc -fuse-ld=lld "/I$testsRoot/stubs" "/I$sourceRoot/src" "/I$sourceRoot/externals/fmt/include" "$testsRoot/farpoint_compat_test.cpp" "$sourceRoot/src/core/libraries/libc_internal/libc_internal_cxa.cpp" "/Fe:$testDir/farpoint_compat_test.exe" "/Fo:$testDir/"
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & "$testDir/farpoint_compat_test.exe"
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & "$llvmBin/clang-cl.exe" /nologo /std:c++latest /MD /EHsc -fuse-ld=lld "/I$sourceRoot/src" "$testsRoot/staged_file_read_test.cpp" "/Fe:$testDir/staged_file_read_test.exe" "/Fo:$testDir/"
+    & "$llvmBin/clang-cl.exe" /nologo /std:c++latest /MD /EHsc -fuse-ld=lld "/I$sourceRoot/src" "/I$sourceRoot/externals/fmt/include" "$testsRoot/staged_file_read_test.cpp" "/Fe:$testDir/staged_file_read_test.exe" "/Fo:$testDir/"
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & "$testDir/staged_file_read_test.exe"
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -74,6 +74,38 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     // Breakpoints almost certainly come from our asserts/unreachables, no need to log it again.
     if (code != EXCEPTION_BREAKPOINT) {
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
+        if (code == EXCEPTION_ACCESS_VIOLATION && pExp && pExp->ExceptionRecord &&
+            pExp->ExceptionRecord->NumberParameters >= 2) {
+            LOG_CRITICAL(Debug, "Access violation operation={} target={:#x}",
+                         pExp->ExceptionRecord->ExceptionInformation[0],
+                         pExp->ExceptionRecord->ExceptionInformation[1]);
+        }
+#if defined(ARCH_X86_64)
+        if (pExp && pExp->ContextRecord) {
+            const auto& c = *pExp->ContextRecord;
+            LOG_CRITICAL(Debug,
+                         "Fault context rip={:#x} rsp={:#x} rbp={:#x} rax={:#x} rbx={:#x} "
+                         "rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x} r8={:#x} r9={:#x}",
+                         c.Rip, c.Rsp, c.Rbp, c.Rax, c.Rbx, c.Rcx, c.Rdx, c.Rsi, c.Rdi,
+                         c.R8, c.R9);
+            // Read safely: an invalid guest stack must not fault the handler again.
+            u64 stack[16]{};
+            SIZE_T bytes_read{};
+            if (ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(c.Rsp),
+                                  stack, sizeof(stack), &bytes_read)) {
+                for (SIZE_T i = 0; i < bytes_read / sizeof(u64); ++i) {
+                    LOG_CRITICAL(Debug, "Fault stack +{:#x}: {:#x}", i * sizeof(u64), stack[i]);
+                }
+            }
+            MEMORY_BASIC_INFORMATION region{};
+            if (VirtualQuery(address, &region, sizeof(region))) {
+                LOG_CRITICAL(Debug, "Fault code region base={} allocation={} size={:#x} "
+                                    "protection={:#x} type={:#x}",
+                             region.BaseAddress, region.AllocationBase, region.RegionSize,
+                             region.Protect, region.Type);
+            }
+        }
+#endif
         // Where it came from: each caller as its module and the place in it.
         void* frames[32];
         const USHORT count = CaptureStackBackTrace(0, 32, frames, nullptr);

@@ -830,6 +830,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
+                // Complete pending CPU-visible lighting data before the guest
+                // observes this fence or its interrupt. OnSubmit is too late.
+                if (rasterizer) {
+                    rasterizer->CompleteGuestReadbacks();
+                }
                 event_eop->SignalFence(
                     [](void* address, u64 data, u32 num_bytes) {
                         auto* memory = Core::Memory::Instance();

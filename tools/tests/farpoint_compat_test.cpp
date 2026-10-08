@@ -4,12 +4,31 @@
 #include "core/libraries/vr_tracker/tracker_compat.h"
 #include "core/vr/stereo_layout.h"
 #include "input/pad_routing.h"
+#include "video_core/amdgpu/regs_color.h"
 #include <atomic>
 #include <cassert>
 #include <cmath>
 #include <thread>
 #include <vector>
 int main() {
+  // Every possible set of active MRTs: packed exports must visit exactly those targets.
+  for (unsigned active = 0; active < 256; ++active) {
+    AmdGpu::ColorBufferMask mask{};
+    for (unsigned target = 0; target < 8; ++target) {
+      mask.SetMask(target, (active & (1u << target)) ? (1u << (target % 4)) : 0);
+    }
+    assert(mask.HasExportHoles() == ((active & (active + 1)) != 0));
+    unsigned export_index = 0;
+    for (unsigned target = 0; target < 8; ++target) {
+      if (active & (1u << target)) {
+        assert(mask.ExportTarget(export_index) == target);
+        assert(mask.ExportIndex(target) == export_index);
+        ++export_index;
+      }
+    }
+    assert(mask.ExportTarget(export_index) == AmdGpu::NUM_COLOR_BUFFERS);
+  }
+
   using namespace Libraries::VrTracker;
   std::array<unsigned char, 144> wire{};
   auto put32 = [&](std::size_t offset, u32 value) {

@@ -39,6 +39,16 @@ constexpr static std::array DescriptorHeapSizes = {
     vk::DescriptorPoolSize{vk::DescriptorType::eSampler, 1024},
 };
 
+// Packed exports skip targets with a zero CB_SHADER_MASK nibble (upstream PR #5279).
+static bool IsDualSourceBlending(const AmdGpu::BlendControl& blend) {
+    return blend.enable &&
+           (LiverpoolToVK::IsDualSourceBlendFactor(blend.color_dst_factor) ||
+            LiverpoolToVK::IsDualSourceBlendFactor(blend.color_src_factor) ||
+            (blend.separate_alpha_blend &&
+             (LiverpoolToVK::IsDualSourceBlendFactor(blend.alpha_dst_factor) ||
+              LiverpoolToVK::IsDualSourceBlendFactor(blend.alpha_src_factor))));
+}
+
 static u32 MapOutputs(std::span<Shader::OutputMap, 3> outputs, const AmdGpu::VsOutputControl& ctl) {
     u32 num_outputs = 0;
 
@@ -200,19 +210,10 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(Stage stage, LogicalS
                                  (stencil_ref_export_enable << 1) |
                                  (regs.depth_shader_control.mask_export_enable << 2) |
                                  (regs.depth_shader_control.coverage_to_mask_enable << 3);
-        const auto& cb0_blend = regs.blend_control[0];
-        if (cb0_blend.enable) {
-            info.fs_info.dual_source_blending =
-                LiverpoolToVK::IsDualSourceBlendFactor(cb0_blend.color_dst_factor) ||
-                LiverpoolToVK::IsDualSourceBlendFactor(cb0_blend.color_src_factor);
-            if (cb0_blend.separate_alpha_blend) {
-                info.fs_info.dual_source_blending |=
-                    LiverpoolToVK::IsDualSourceBlendFactor(cb0_blend.alpha_dst_factor) ||
-                    LiverpoolToVK::IsDualSourceBlendFactor(cb0_blend.alpha_src_factor);
-            }
-        } else {
-            info.fs_info.dual_source_blending = false;
-        }
+        info.fs_info.dual_source_blending = IsDualSourceBlending(regs.blend_control[0]);
+        info.fs_info.cb_shader_mask =
+            !info.fs_info.dual_source_blending && regs.color_shader_mask.HasExportHoles()
+                ? regs.color_shader_mask.raw : 0;
         const auto& ps_inputs = regs.ps_inputs;
         for (u32 i = 0; i < regs.num_interp; i++) {
             info.fs_info.inputs[i] = {
@@ -428,6 +429,13 @@ bool PipelineCache::RefreshGraphicsKey() {
     key.depth_samples = db_enabled ? regs.depth_buffer.NumSamples() : 1;
     key.num_samples = key.depth_samples;
     key.cb_shader_mask = regs.color_shader_mask;
+    if (regs.color_shader_mask.HasExportHoles()) {
+        static u32 reported = 0;
+        if (reported++ < 8) {
+            LOG_INFO(Render_Vulkan, "Packed color export: shader mask {:#x}, export formats {:#x}",
+                     regs.color_shader_mask.raw, regs.color_export_format.raw);
+        }
+    }
 
     const bool skip_cb_binding =
         regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Disable;
@@ -445,7 +453,15 @@ bool PipelineCache::RefreshGraphicsKey() {
         color_buffer.data_format = col_buf.GetDataFmt();
         color_buffer.num_format = col_buf.GetNumberFmt();
         color_buffer.num_conversion = col_buf.GetNumberConversion();
-        color_buffer.export_format = regs.color_export_format.GetFormat(cb);
+        const auto& shader_mask = regs.color_shader_mask;
+        if (IsDualSourceBlending(regs.blend_control[0]) || !shader_mask.HasExportHoles()) {
+            color_buffer.export_format = regs.color_export_format.GetFormat(cb);
+        } else if (shader_mask.GetMask(cb) != 0) {
+            color_buffer.export_format =
+                regs.color_export_format.GetFormat(shader_mask.ExportIndex(cb));
+        } else {
+            color_buffer.export_format = AmdGpu::ShaderExportFormat::Zero;
+        }
         color_buffer.swizzle = col_buf.Swizzle();
     }
 
@@ -773,6 +789,23 @@ std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule mo
         }
     }
     return new_module;
+}
+
+bool PipelineCache::ReplaceDiagnosticGroundShader(std::span<const u32> spv_code) {
+    const auto it = program_cache.find(0x17153927d25e6e32ULL);
+    if (it == program_cache.end() || it.value()->modules.size() != 1) return false;
+    // The debug module-to-pipeline index is populated only when shader collection
+    // is enabled. Find matching keys directly, including preloaded pipelines.
+    std::vector<GraphicsPipelineKey> invalidate;
+    const auto stage_hash = HashCombine(0x17153927d25e6e32ULL, 0);
+    for (const auto& [key, pipeline] : graphics_pipelines) {
+        if (key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Fragment)] == stage_hash) {
+            invalidate.push_back(key);
+        }
+    }
+    for (const auto& key : invalidate) graphics_pipelines.erase(key);
+    LOG_INFO(Render_Vulkan, "Ground diagnostic invalidated {} cached pipelines", invalidate.size());
+    return ReplaceShader(it.value()->modules[0].module, spv_code).has_value();
 }
 
 std::string PipelineCache::GetShaderName(Shader::Stage stage, u64 hash,

@@ -194,6 +194,7 @@ struct FragmentRuntimeInfo {
     u32 num_inputs;
     std::array<PsInput, 32> inputs;
     std::array<PsColorBuffer, MaxColorBuffers> color_buffers;
+    u32 cb_shader_mask{};
     AmdGpu::ShaderExportFormat z_export_format;
     u8 mrtz_mask{};
     bool dual_source_blending{false};
@@ -201,6 +202,7 @@ struct FragmentRuntimeInfo {
 
     bool operator==(const FragmentRuntimeInfo& other) const noexcept {
         return std::ranges::equal(color_buffers, other.color_buffers) &&
+               cb_shader_mask == other.cb_shader_mask &&
                en_flags == other.en_flags && addr_flags == other.addr_flags &&
                num_inputs == other.num_inputs && z_export_format == other.z_export_format &&
                mrtz_mask == other.mrtz_mask && dual_source_blending == other.dual_source_blending &&

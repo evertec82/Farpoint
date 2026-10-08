@@ -297,7 +297,16 @@ s32 ImageInfo::MipOf(const ImageInfo& info) const {
     const auto mip_w = std::max(info_block_dim.width >> mip, 1u);
     const auto mip_h = std::max(info_block_dim.height >> mip, 1u);
     if ((curr_block_dim.width != mip_w) || (curr_block_dim.height != mip_h)) {
-        return -1;
+        // Small uncompressed render targets retain a tile-aligned pitch even when
+        // their logical mip width is 4, 2, or 1. Compare that pitch with the parent's
+        // stored mip layout, not with an unaligned right shift of its base pitch.
+        const bool padded_mip = !props.is_block && !info.props.is_block &&
+            size.width == std::max(info.size.width >> mip, 1u) &&
+            size.height == std::max(info.size.height >> mip, 1u) &&
+            pitch == info.mips_layout[mip].pitch;
+        if (!padded_mip) {
+            return -1;
+        }
     }
 
     const auto mip_d = std::max(info.size.depth >> mip, 1u);
@@ -316,6 +325,9 @@ s32 ImageInfo::MipOf(const ImageInfo& info) const {
 }
 
 s32 ImageInfo::SliceOf(const ImageInfo& info, s32 mip) const {
+    if (mip < 0 || mip >= info.resources.levels || info.resources.layers == 0) {
+        return -1;
+    }
     if (!IsCompatible(info)) {
         return -1;
     }
@@ -332,22 +344,35 @@ s32 ImageInfo::SliceOf(const ImageInfo& info, s32 mip) const {
     const auto mip_w = std::max(info_block_dim.width >> mip, 1u);
     const auto mip_h = std::max(info_block_dim.height >> mip, 1u);
     if ((curr_block_dim.width != mip_w) || (curr_block_dim.height != mip_h)) {
-        return -1;
+        // Small uncompressed render targets retain a tile-aligned pitch even when
+        // their logical mip width is 4, 2, or 1. Compare that pitch with the parent's
+        // stored mip layout, not with an unaligned right shift of its base pitch.
+        const bool padded_mip = !props.is_block && !info.props.is_block &&
+            size.width == std::max(info.size.width >> mip, 1u) &&
+            size.height == std::max(info.size.height >> mip, 1u) &&
+            pitch == info.mips_layout[mip].pitch;
+        if (!padded_mip) {
+            return -1;
+        }
     }
 
-    // Check for size alignment.
-    const u32 slice_size = info.mips_layout[mip].size / info.resources.layers;
-    if (guest_size % slice_size != 0) {
+    // A view can span several layers. Address alignment and the layer index
+    // are measured in individual slices, not in the size of the entire view.
+    const auto& layout = info.mips_layout[mip];
+    const u32 slice_size = layout.size / info.resources.layers;
+    if (slice_size == 0 || guest_size == 0 || guest_size % slice_size != 0) {
         return -1;
     }
-
-    // Ensure that address is aligned too.
-    const auto addr_diff = guest_address - (info.guest_address + info.mips_layout[mip].offset);
-    if ((addr_diff % guest_size) != 0) {
+    const VAddr mip_base = info.guest_address + layout.offset;
+    if (guest_address < mip_base) {
         return -1;
     }
-
-    return addr_diff / guest_size;
+    const auto addr_diff = guest_address - mip_base;
+    if (addr_diff >= layout.size || guest_size > layout.size - addr_diff ||
+        addr_diff % slice_size != 0) {
+        return -1;
+    }
+    return static_cast<s32>(addr_diff / slice_size);
 }
 
 } // namespace VideoCore
