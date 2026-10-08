@@ -88,6 +88,23 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
                          "rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x} r8={:#x} r9={:#x}",
                          c.Rip, c.Rsp, c.Rbp, c.Rax, c.Rbx, c.Rcx, c.Rdx, c.Rsi, c.Rdi,
                          c.R8, c.R9);
+            LOG_CRITICAL(Debug,
+                         "Fault context r10={:#x} r11={:#x} r12={:#x} r13={:#x} r14={:#x} r15={:#x}",
+                         c.R10, c.R11, c.R12, c.R13, c.R14, c.R15);
+            // SysV leaf functions keep live locals below RSP. These include the
+            // saved output pointer in Farpoint's failing index-generation routine.
+            // Only read on a fatal fault; never dereference a possibly damaged stack.
+            if (c.Rsp >= 128) {
+                u64 red_zone[16]{};
+                SIZE_T red_zone_read{};
+                if (ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(c.Rsp - 128),
+                                      red_zone, sizeof(red_zone), &red_zone_read)) {
+                    for (SIZE_T i = 0; i < red_zone_read / sizeof(u64); ++i) {
+                        LOG_CRITICAL(Debug, "Fault stack -{:#x}: {:#x}",
+                                     128 - i * sizeof(u64), red_zone[i]);
+                    }
+                }
+            }
             // Read safely: an invalid guest stack must not fault the handler again.
             u64 stack[16]{};
             SIZE_T bytes_read{};
