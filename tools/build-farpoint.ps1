@@ -26,7 +26,11 @@ if ($Test) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & "$testDir/staged_file_read_test.exe"
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    Write-Output 'Farpoint compatibility and protected-page file read tests passed'
+    & "$llvmBin/clang-cl.exe" /nologo /std:c++latest /MD /EHsc -fuse-ld=lld "/I$sourceRoot/src" "$testsRoot/unique_function_test.cpp" "/Fe:$testDir/unique_function_test.exe" "/Fo:$testDir/"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & "$testDir/unique_function_test.exe"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Write-Output 'Farpoint compatibility, protected-page file read and callback ownership tests passed'
     exit 0
 }
 $buildDir = Join-Path $repoRoot 'build/win-fix'

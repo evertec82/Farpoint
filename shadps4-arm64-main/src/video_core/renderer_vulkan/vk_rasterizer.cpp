@@ -267,33 +267,6 @@ void Rasterizer::EliminateFastClear() {
 void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     RENDERER_TRACE;
 
-    // Opt-in private diagnostic. Drain the GPU before using the existing shader
-    // replacement path, which destroys pipelines referencing the old module.
-    static u32 ground_reload_poll = 0;
-    if (Common::ElfInfo::Instance().GameSerial() == "CUSA04508" &&
-        (++ground_reload_poll % 4096) == 0) {
-        const auto request = Common::FS::GetUserPath(Common::FS::PathType::UserDir) /
-                             "ground_shader_request.spv";
-        std::ifstream input{request, std::ios::binary | std::ios::ate};
-        if (input) {
-            const auto bytes = static_cast<std::streamoff>(input.tellg());
-            if (bytes >= 20 && bytes <= 1024 * 1024 && bytes % 4 == 0) {
-                std::vector<u32> spv(static_cast<size_t>(bytes) / 4);
-                input.seekg(0);
-                input.read(reinterpret_cast<char*>(spv.data()), bytes);
-                if (input && spv[0] == 0x07230203) {
-                    scheduler.Finish();
-                    if (pipeline_cache.ReplaceDiagnosticGroundShader(spv)) {
-                        input.close();
-                        std::error_code ec;
-                        std::filesystem::remove(request, ec);
-                        LOG_INFO(Render_Vulkan, "Ground diagnostic shader replaced live");
-                    }
-                }
-            }
-        }
-    }
-
     scheduler.PopPendingOperations();
     if (scheduler.IsFlushDue()) {
         Flush();
@@ -394,21 +367,6 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         buffer_cache.BindIndexBuffer(index_offset);
     }
 
-    // Private ground-lighting diagnostic: byte 39 is unused by this captured
-    // shader (seven buffer bindings). Mode zero retains its original output.
-    if (Common::ElfInfo::Instance().GameSerial() == "CUSA04508" &&
-        pipeline->GetStages()[static_cast<u32>(Shader::LogicalStage::Fragment)] &&
-        pipeline->GetStage(Shader::LogicalStage::Fragment).pgm_hash == 0x17153927d25e6e32ULL) {
-        static u32 diagnostic_poll = 0;
-        static u32 diagnostic_mode = 0;
-        if ((diagnostic_poll++ % 128) == 0) {
-            std::ifstream request{Common::FS::GetUserPath(Common::FS::PathType::UserDir) /
-                                  "ground_lighting_mode.txt"};
-            u32 requested_mode = 0;
-            diagnostic_mode = (request >> requested_mode) && requested_mode <= 13 ? requested_mode : 0;
-        }
-        push_data.buf_offsets[39] = static_cast<u8>(diagnostic_mode);
-    }
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
@@ -440,75 +398,12 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                     instance_offset);
     }
 
-    CapturePixelHistory(pipeline);
     ResetBindings();
     RetireIsolatedReadConstSnapshots();
 }
 
 // Explicit, bounded diagnostic. A request contains: hex address, x1 y1 x2 y2,
 // sample count. Every row reads GPU memory after a draw; no guest-memory fallback.
-void Rasterizer::CapturePixelHistory(const GraphicsPipeline* pipeline) {
-    if (Common::ElfInfo::Instance().GameSerial() != "CUSA04508") return;
-    static u32 poll = 0;
-    static VAddr address = 0;
-    static std::array<u32, 4> xy{};
-    static u32 remaining = 0, sequence = 0;
-    static const auto dir = Common::FS::GetUserPath(Common::FS::PathType::UserDir);
-    if (remaining == 0 && (++poll % 2048) == 0) {
-        const auto request = dir / "pixel_history_request.txt";
-        std::ifstream input{request};
-        u32 count = 0;
-        if (input >> std::hex >> address >> std::dec >> xy[0] >> xy[1] >> xy[2] >> xy[3] >> count) {
-            remaining = std::min(count, 512u);
-            sequence = 0;
-            std::ofstream{dir / "pixel_history.csv"} << "draw,shader,x1,y1,x2,y2,rgba16_pixel1,rgba16_pixel2\n";
-            std::error_code ec;
-            input.close();
-            std::filesystem::remove(request, ec);
-        }
-    }
-    const auto& cb = liverpool->regs.color_buffers[0];
-    if (remaining == 0 || cb.Address() != address) return;
-    const auto id = texture_cache.FindImageFromRange(address, cb.GetColorSliceSize(), false);
-    if (!id) return;
-    auto& image = texture_cache.GetImage(id);
-    if (image.info.pixel_format != vk::Format::eR16G16B16A16Sfloat ||
-        image.info.num_samples != 1 || image.info.props.is_volume ||
-        image.info.resources.layers != 1 || xy[0] >= image.info.size.width ||
-        xy[2] >= image.info.size.width || xy[1] >= image.info.size.height ||
-        xy[3] >= image.info.size.height) {
-        remaining = 0;
-        LOG_WARNING(Render_Vulkan, "Pixel history rejected incompatible target or coordinates");
-        return;
-    }
-    VideoCore::Buffer buffer{instance, scheduler, VideoCore::MemoryUsage::Download, 0,
-                             vk::BufferUsageFlagBits::eTransferDst, 16};
-    scheduler.EndRendering();
-    const auto cmd = scheduler.CommandBuffer();
-    image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {}, cmd);
-    std::array<vk::BufferImageCopy, 2> copies{};
-    for (u32 i = 0; i < 2; ++i) {
-        copies[i].bufferOffset = i * 8;
-        copies[i].imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
-        copies[i].imageOffset = {static_cast<s32>(xy[i*2]), static_cast<s32>(xy[i*2+1]), 0};
-        copies[i].imageExtent = {1, 1, 1};
-    }
-    cmd.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal, buffer.Handle(), copies);
-    image.Transit(vk::ImageLayout::eColorAttachmentOptimal,
-                  vk::AccessFlagBits2::eColorAttachmentRead | vk::AccessFlagBits2::eColorAttachmentWrite, {}, cmd);
-    scheduler.Finish();
-    vmaInvalidateAllocation(instance.GetAllocator(), buffer.buffer.allocation, 0, VK_WHOLE_SIZE);
-    std::array<u64, 2> values{};
-    std::memcpy(values.data(), buffer.mapped_data.data(), 16);
-    const auto* fs = pipeline->GetStages()[static_cast<u32>(Shader::LogicalStage::Fragment)];
-    std::ofstream out{dir / "pixel_history.csv", std::ios::app};
-    out << fmt::format("{},{:016x},{},{},{},{},{:016x},{:016x}\n", sequence++, fs ? fs->pgm_hash : 0,
-                       xy[0], xy[1], xy[2], xy[3], values[0], values[1]);
-    if (--remaining == 0) {
-        LOG_INFO(Render_Vulkan, "Pixel history complete: {} samples", sequence);
-    }
-}
-
 boost::container::small_vector<u8, 4> Rasterizer::SharedTargetPasses(u8 mrt_mask) const {
     // A title may bind one surface as two colour targets and write some channels through the
     // one, the others through the other: that way each can have blending of its own. (Astro
@@ -660,7 +555,6 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         }
     }
 
-    CapturePixelHistory(pipeline);
     ResetBindings();
     RetireIsolatedReadConstSnapshots();
 }

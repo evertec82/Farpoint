@@ -861,25 +861,6 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
         texture_cache.UpdateImage(image_ids[eye]);
     }
 
-    // Diagnostics: creating <UserDir>/dump_render_targets dumps what the guest has rendered so
-    // far, once, to tell a guest that draws nothing apart from output that gets lost on the way.
-    {
-        std::error_code ec;
-        const auto dump_flag =
-            Common::FS::GetUserPath(Common::FS::PathType::UserDir) / "dump_render_targets";
-        static u32 frames_until_check = 0;
-        if (frames_until_check-- == 0) {
-            frames_until_check = 120;
-            if (std::filesystem::exists(dump_flag, ec)) {
-                std::filesystem::remove(dump_flag, ec);
-                DumpGpuImages();
-                // Campaign scenes can exceed 3000 draw/dispatch operations before
-                // tonemapping. Keep a bounded trace long enough to include those passes.
-                Rasterizer::StartDrawTrace(30000);
-            }
-        }
-    }
-
     static u32 logged_frames = 0;
     if (logged_frames < 3 || (logged_frames % 600) == 0) {
         for (u32 eye = 0; eye < 2; ++eye) {

@@ -555,8 +555,11 @@ void Scheduler::PopPendingOperations() {
     // timeline semaphore here makes Turnip enter a blocking ioctl on every submission, defeating
     // that batching. Only reclaim objects already proven idle; Finish() drains after its wait.
     while (!pending_ops.empty() && master_semaphore.IsFree(pending_ops.front().gpu_tick)) {
-        pending_ops.front().callback();
+        // A callback can wait/submit and re-enter this drain. Remove it first
+        // and keep it alive locally so nested drains cannot invoke or destroy it.
+        auto op = std::move(pending_ops.front());
         pending_ops.pop();
+        op.callback();
     }
 }
 

@@ -45,7 +45,6 @@ public:
 
     /// Logs the next `count` guest draws, dispatches and markers. Debugging aid.
     static void StartDrawTrace(s32 count);
-    void CapturePixelHistory(const GraphicsPipeline* pipeline);
 
     [[nodiscard]] VideoCore::BufferCache& GetBufferCache() noexcept {
         return buffer_cache;
