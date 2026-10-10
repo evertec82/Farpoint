@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <optional>
 #include <fmt/ranges.h>
 
@@ -744,16 +745,26 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         }
         return {};
     };
-    const auto flip_hmd_frame = [this, &refresh_clock](const Request& request) {
+    u32 pace = 2;
+    if (early_flips) {
+        if (const char* setting = std::getenv("SHADPS4_VR_PACE"); setting != nullptr) {
+            char* end = nullptr;
+            const long requested = std::strtol(setting, &end, 10);
+            if (end != setting && *end == '\0' && requested >= 1 && requested <= 6) {
+                pace = static_cast<u32>(requested);
+            }
+        }
+        LOG_INFO(Lib_VideoOut,
+                 "VR frame pacing: {} host refresh(es) per two guest vblanks", pace);
+    }
+
+    const auto flip_hmd_frame = [this, &refresh_clock, pace](const Request& request) {
         const auto now = std::chrono::steady_clock::now();
 
         Flip(request);
-        refresh_clock.NoteDelivery(now, 0u);
+        refresh_clock.NoteDelivery(now, pace);
         FRAME_END;
     };
-
-    // How many refreshes of the display two of the headset's last.
-    u32 pace = 2;
 
     while (!token.stop_requested()) {
         if (precise_pacing && early_flips) {
