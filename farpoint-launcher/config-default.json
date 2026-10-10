@@ -37,7 +37,6 @@
   "General": {
     "addon_install_dir": "",
     "big_picture_scale": 1000,
-    "connected_to_network": false,
     "console_language": 1,
     "dev_kit_mode": false,
     "discord_rpc_enabled": false,
@@ -47,7 +46,6 @@
     "home_dir": "",
     "install_dirs": [],
     "neo_mode": false,
-    "shad_net_enabled": false,
     "shadnet_server": "",
     "show_fps_counter": false,
     "show_splash": false,
@@ -100,5 +98,9 @@
     "vkvalidation_enabled": false,
     "vkvalidation_gpu_enabled": false,
     "vkvalidation_sync_enabled": false
+  },
+  "Network": {
+    "connected_to_network": false,
+    "shad_net_enabled": false
   }
 }

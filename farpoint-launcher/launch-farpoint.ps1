@@ -113,8 +113,15 @@ $requiredExtraMemoryMb = if ($EyeWidth -ge 3072) { 6144 } elseif ($EyeWidth -ge 
 $config.General.extra_dmem_in_mbytes = [Math]::Max([int]$config.General.extra_dmem_in_mbytes, $requiredExtraMemoryMb)
 $config.Input.use_special_pad = $Controller -eq 'Aim'
 $config.Input.special_pad_class = 9
-$config.General.connected_to_network = $false
-$config.General.shad_net_enabled = $false
+if (-not $config.PSObject.Properties['Network'] -or $null -eq $config.Network) {
+    $config | Add-Member -NotePropertyName Network -NotePropertyValue ([pscustomobject]@{}) -Force
+}
+$config.Network | Add-Member -NotePropertyName connected_to_network -NotePropertyValue $false -Force
+$config.Network | Add-Member -NotePropertyName shad_net_enabled -NotePropertyValue $false -Force
+# Preserve compatibility with profiles that have not yet been migrated by the emulator.
+foreach ($name in @('connected_to_network', 'shad_net_enabled')) {
+    if ($config.General.PSObject.Properties[$name]) { $config.General.$name = $false }
+}
 $config | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $configPath -Encoding UTF8
 @{ GamePath=$GamePath; Controller=$Controller; MirrorFps=$MirrorFps; EyeWidth=$EyeWidth } | ConvertTo-Json | Set-Content -LiteralPath $settingsFile -Encoding UTF8
 $env:SHADPS4_OPENXR = '1'; $env:SHADPS4_VR = '1'
