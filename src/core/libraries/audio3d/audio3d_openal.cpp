@@ -904,8 +904,8 @@ s32 PS4_SYSV_ABI sceAudio3dBedWrite2(const OrbisAudio3dPortId port_id, const u32
         return ORBIS_AUDIO3D_ERROR_INVALID_PORT;
     }
 
-    if (output_route > OrbisAudio3dOutputRoute::ORBIS_AUDIO3D_OUTPUT_BOTH) {
-        LOG_ERROR(Lib_Audio3d, "output_route > ORBIS_AUDIO3D_OUTPUT_BOTH");
+    if (output_route > OrbisAudio3dOutputRoute::ORBIS_AUDIO3D_OUTPUT_TV_ONLY) {
+        LOG_ERROR(Lib_Audio3d, "Invalid output_route {}", static_cast<u32>(output_route));
         return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER;
     }
 

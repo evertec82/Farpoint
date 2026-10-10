@@ -113,6 +113,24 @@ ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr ht
     stencil_addr = write_buffer ? buffer.StencilWriteAddress() : buffer.StencilAddress();
 
     guest_address = write_buffer ? buffer.DepthWriteAddress() : buffer.DepthAddress();
+    props.is_stencil_only = guest_address == 0 && stencil_addr != 0;
+    if (props.is_stencil_only) {
+        // Stencil can be bound without a Z plane. Key and upload the real byte
+        // surface instead of resolving address zero to a 1x1 null depth image.
+        guest_address = stencil_addr;
+        num_bits = 8;
+        if (props.is_tiled) {
+            guest_size = (buffer.depth_slice.tile_max + 1) * 64 * num_samples;
+        } else {
+            std::tie(std::ignore, std::ignore, guest_size) =
+                ImageSizeLinearAligned(pitch, size.height, num_bits, num_samples);
+        }
+        guest_size *= resources.layers;
+        mips_layout[0] = MipInfo(guest_size, pitch,
+                               props.is_tiled ? buffer.Height() : size.height, 0);
+        stencil_size = guest_size;
+        return;
+    }
     if (props.is_tiled) {
         guest_size = buffer.GetDepthSliceSize() * resources.layers;
         mips_layout[0] = MipInfo(guest_size, pitch, buffer.Height(), 0);

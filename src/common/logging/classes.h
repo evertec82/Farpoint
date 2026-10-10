@@ -18,6 +18,8 @@ enum class Class {
     Common_Memory,     ///< Memory mapping and management functions
     KeyManager,        ///< Key management system
     Core,              ///< LLE emulation core
+    Core_Vr,
+    Lib_SocialScreen,
     Core_Linker,       ///< The module linker
     Core_Devices,      ///< Devices emulation
     Config,            ///< Emulator configuration (including commandline)

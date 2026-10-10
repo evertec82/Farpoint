@@ -8,6 +8,8 @@
 #include "core/libraries/hmd/hmd_error.h"
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/libs.h"
+#include "core/user_settings.h"
+#include "core/vr/vr_runtime.h"
 
 namespace Libraries::Hmd {
 
@@ -16,6 +18,38 @@ static s32 g_firmware_version = 0;
 static s32 g_internal_handle = 0;
 static Libraries::UserService::OrbisUserServiceUserId g_user_id = -1;
 
+// Panel of the first generation headset: one 1920x1080 OLED shared by both eyes.
+static constexpr u32 PanelWidth = 1920;
+static constexpr u32 PanelHeight = 1080;
+// Microseconds between a flip and the frame reaching the panel, per refresh rate. Titles add
+// this to their tracker prediction time, so the exact figure only shifts that prediction.
+static constexpr u16 FlipToDisplayLatency90Hz = 13000;
+static constexpr u16 FlipToDisplayLatency120Hz = 10000;
+
+static bool HeadsetConnected() {
+    return Core::Vr::Runtime::Instance().IsHeadsetConnected();
+}
+
+static void FillDeviceInformation(OrbisHmdDeviceInformation* info) {
+    memset(info, 0, sizeof(OrbisHmdDeviceInformation));
+    info->user_id = g_user_id;
+    if (!HeadsetConnected()) {
+        info->status = OrbisHmdDeviceStatus::ORBIS_HMD_DEVICE_STATUS_NOT_DETECTED;
+        return;
+    }
+    // A headset always belongs to a logged in user, also before anything opened it. Titles look
+    // that user up to decide whether the headset is usable.
+    if (g_user_id == -1) {
+        info->user_id = UserManagement.GetDefaultUser().user_id;
+    }
+    info->status = OrbisHmdDeviceStatus::ORBIS_HMD_DEVICE_STATUS_READY;
+    info->device_info.panel_resolution = {PanelWidth, PanelHeight};
+    info->device_info.flip_to_display_latency = {FlipToDisplayLatency90Hz,
+                                                 FlipToDisplayLatency120Hz};
+    // Whether the headset is on the head: always, unless a host knows better.
+    info->hmu_mount = Core::Vr::Runtime::Instance().IsHeadsetWorn() ? 1 : 0;
+}
+
 s32 PS4_SYSV_ABI sceHmdInitialize(const OrbisHmdInitializeParam* param) {
     if (g_library_initialized) {
         return ORBIS_HMD_ERROR_ALREADY_INITIALIZED;
@@ -23,7 +57,7 @@ s32 PS4_SYSV_ABI sceHmdInitialize(const OrbisHmdInitializeParam* param) {
     if (param == nullptr) {
         return ORBIS_HMD_ERROR_PARAMETER_NULL;
     }
-    LOG_WARNING(Lib_Hmd, "PSVR headsets are not supported yet");
+    LOG_INFO(Lib_Hmd, "called, virtual headset connected = {}", HeadsetConnected());
     if (param->reserved0 != nullptr) {
         sceHmdDistortionInitialize(param->reserved0);
     }
@@ -38,7 +72,7 @@ s32 PS4_SYSV_ABI sceHmdInitialize315(const OrbisHmdInitializeParam* param) {
     if (param == nullptr) {
         return ORBIS_HMD_ERROR_PARAMETER_NULL;
     }
-    LOG_WARNING(Lib_Hmd, "PSVR headsets are not supported yet");
+    LOG_INFO(Lib_Hmd, "called, virtual headset connected = {}", HeadsetConnected());
     g_library_initialized = true;
     return ORBIS_OK;
 }
@@ -76,7 +110,7 @@ s32 PS4_SYSV_ABI sceHmdGet2DEyeOffset(s32 handle, OrbisHmdEyeOffset* left_offset
     if (handle != g_internal_handle) {
         return ORBIS_HMD_ERROR_HANDLE_INVALID;
     }
-    if (g_firmware_version >= Common::ElfInfo::FW_450) {
+    if (!HeadsetConnected() && g_firmware_version >= Common::ElfInfo::FW_450) {
         // Due to some faulty in-library checks, a missing headset results in this error
         // instead of the expected ORBIS_HMD_ERROR_DEVICE_DISCONNECTED error.
         return ORBIS_HMD_ERROR_HANDLE_INVALID;
@@ -85,11 +119,12 @@ s32 PS4_SYSV_ABI sceHmdGet2DEyeOffset(s32 handle, OrbisHmdEyeOffset* left_offset
         return ORBIS_HMD_ERROR_PARAMETER_NULL;
     }
 
-    // Return default values
-    left_offset->offset_x = -0.0315;
+    // Half the interpupillary distance either side of the headset centre.
+    const float half_ipd = Core::Vr::Runtime::Instance().GetConfig().ipd * 0.5f;
+    left_offset->offset_x = -half_ipd;
     left_offset->offset_y = 0;
     left_offset->offset_z = 0;
-    right_offset->offset_x = 0.0315;
+    right_offset->offset_x = half_ipd;
     right_offset->offset_y = 0;
     right_offset->offset_z = 0;
 
@@ -117,9 +152,7 @@ s32 PS4_SYSV_ABI sceHmdGetDeviceInformation(OrbisHmdDeviceInformation* info) {
         return ORBIS_HMD_ERROR_NOT_INITIALIZED;
     }
 
-    memset(info, 0, sizeof(OrbisHmdDeviceInformation));
-    info->status = OrbisHmdDeviceStatus::ORBIS_HMD_DEVICE_STATUS_NOT_DETECTED;
-    info->user_id = g_user_id;
+    FillDeviceInformation(info);
     return ORBIS_OK;
 }
 
@@ -128,7 +161,7 @@ s32 PS4_SYSV_ABI sceHmdGetDeviceInformationByHandle(s32 handle, OrbisHmdDeviceIn
     if (handle != g_internal_handle) {
         return ORBIS_HMD_ERROR_HANDLE_INVALID;
     }
-    if (g_firmware_version >= Common::ElfInfo::FW_450) {
+    if (!HeadsetConnected() && g_firmware_version >= Common::ElfInfo::FW_450) {
         // Due to some faulty in-library checks, a missing headset results in this error
         // instead of the expected ORBIS_HMD_ERROR_DEVICE_DISCONNECTED error.
         return ORBIS_HMD_ERROR_HANDLE_INVALID;
@@ -140,9 +173,7 @@ s32 PS4_SYSV_ABI sceHmdGetDeviceInformationByHandle(s32 handle, OrbisHmdDeviceIn
         return ORBIS_HMD_ERROR_NOT_INITIALIZED;
     }
 
-    memset(info, 0, sizeof(OrbisHmdDeviceInformation));
-    info->status = OrbisHmdDeviceStatus::ORBIS_HMD_DEVICE_STATUS_NOT_DETECTED;
-    info->user_id = g_user_id;
+    FillDeviceInformation(info);
     return ORBIS_OK;
 }
 
@@ -154,24 +185,23 @@ s32 PS4_SYSV_ABI sceHmdGetFieldOfView(s32 handle, OrbisHmdFieldOfView* field_of_
     if (handle != g_internal_handle) {
         return ORBIS_HMD_ERROR_HANDLE_INVALID;
     }
-    if (g_firmware_version >= Common::ElfInfo::FW_450) {
-        // Due to some faulty in-library checks, a missing headset results in this error
-        // instead of the expected ORBIS_HMD_ERROR_DEVICE_DISCONNECTED error.
-        return ORBIS_HMD_ERROR_HANDLE_INVALID;
-    }
     if (!g_library_initialized) {
         return ORBIS_HMD_ERROR_NOT_INITIALIZED;
     }
+    if (!HeadsetConnected()) {
+        // Fails internally due to some internal library checks that break without a connected
+        // headset.
+        return ORBIS_HMD_ERROR_HANDLE_INVALID;
+    }
 
-    // These values are a hardcoded return when a headset is connected.
-    // Leaving this here for future developers.
-    // field_of_view->tan_out = 1.20743;
-    // field_of_view->tan_in = 1.181346;
-    // field_of_view->tan_top = 1.262872;
-    // field_of_view->tan_bottom = 1.262872;
-
-    // Fails internally due to some internal library checks that break without a connected headset.
-    return ORBIS_HMD_ERROR_HANDLE_INVALID;
+    // Real hardware always reports 1.20743 / 1.181346 / 1.262872 / 1.262872 here. Those are the
+    // defaults, unless the host display asked for a different field of view.
+    const auto fov = Core::Vr::Runtime::Instance().TitleFov();
+    field_of_view->tan_out = fov.tan_out;
+    field_of_view->tan_in = fov.tan_in;
+    field_of_view->tan_top = fov.tan_top;
+    field_of_view->tan_bottom = fov.tan_bottom;
+    return ORBIS_OK;
 }
 
 s32 PS4_SYSV_ABI sceHmdGetInertialSensorData(s32 handle, void* data, s32 unk) {
@@ -420,8 +450,9 @@ s32 PS4_SYSV_ABI sceHmdInternalGetDeviceStatus(OrbisHmdDeviceStatus* status) {
     if (status == nullptr) {
         return ORBIS_HMD_ERROR_PARAMETER_NULL;
     }
-    // Internal function fails with error DEVICE_DISCONNECTED
-    *status = OrbisHmdDeviceStatus::ORBIS_HMD_DEVICE_STATUS_NOT_DETECTED;
+    // Internal function fails with error DEVICE_DISCONNECTED when no headset is present.
+    *status = HeadsetConnected() ? OrbisHmdDeviceStatus::ORBIS_HMD_DEVICE_STATUS_READY
+                                 : OrbisHmdDeviceStatus::ORBIS_HMD_DEVICE_STATUS_NOT_DETECTED;
     return ORBIS_OK;
 }
 
@@ -568,7 +599,7 @@ s32 PS4_SYSV_ABI sceHmdInternalMmapGetSensorCalibrationData() {
 s32 PS4_SYSV_ABI sceHmdInternalMmapIsConnect() {
     LOG_DEBUG(Lib_Hmd, "called");
     // Returns 0 when device is disconnected.
-    return 0;
+    return HeadsetConnected() ? 1 : 0;
 }
 
 s32 PS4_SYSV_ABI sceHmdInternalPushVr2dData() {

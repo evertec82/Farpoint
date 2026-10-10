@@ -1,3 +1,4 @@
+#include "core/vr/vr_runtime.h"
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -1783,7 +1784,7 @@ s32 PS4_SYSV_ABI sceSystemServiceGetStatus(OrbisSystemServiceStatus* status) {
 
     std::lock_guard<std::mutex> lock(g_event_queue_mutex);
     status->event_num = static_cast<s32>(g_event_queue.size());
-    status->is_system_ui_overlaid = false;
+    status->is_system_ui_overlaid = Core::Vr::Runtime::Instance().IsHeadsetConnected() && !Core::Vr::Runtime::Instance().IsHeadsetWorn();
     status->is_in_background_execution = false;
     status->is_cpu_mode7_cpu_normal = true;
     status->is_game_live_streaming_on_air = false;

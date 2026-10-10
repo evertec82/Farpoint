@@ -10,13 +10,17 @@
 #include "core/devtools/layer.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/system/systemservice.h"
-#include "imgui/friends_layer.h"
-#include "imgui/invitation_prompt_layer.h"
+#include "core/vr/spectator_view.h"
+#include "core/vr/stereo_layout.h"
+#ifdef ENABLE_OPENXR_HOST
+#include "core/vr/openxr_host.h"
+#endif
 #include "imgui/notifications_layer.h"
 #include "imgui/renderer/imgui_core.h"
 #include "imgui/renderer/imgui_impl_vulkan.h"
-#include "imgui/shadnet_notifications_layer.h"
 #include "sdl_window.h"
+#include "video_core/amdgpu/liverpool.h"
+
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -42,7 +46,9 @@
 #include <sstream>
 #include <system_error>
 #include <vector>
+#include <boost/container/static_vector.hpp>
 #include <imgui.h>
+#include <png.h>
 #include <stb_image_write.h>
 #include <vk_mem_alloc.h>
 
@@ -489,19 +495,31 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     fsr_settings.rcas_attenuation =
         static_cast<float>(EmulatorSettings.GetRcasAttenuation() / 1000.f);
 
-    fsr_pass.Create(device, instance.GetAllocator(), num_images);
-    pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
+    fsr_pass.Create(device,
+                    instance.GetAllocator(), num_images);
+    pp_pass.Create(instance, draw_scheduler.GetWorkSemaphore(),
+                   swapchain.GetSurfaceFormat().format);
+    vr_exporter = std::make_unique<VrExporter>(instance, draw_scheduler);
+#ifdef ENABLE_OPENXR_HOST
+    if (vr_exporter->HasLocalHost()) {
+        // The machine has a headset of its own: its session is made on this device.
+        hmd_pp_pass.Create(instance, draw_scheduler.GetWorkSemaphore(),
+                           Core::Vr::OpenXrHost::FrameFormat);
+        Core::Vr::OpenXrHost::Instance().Start({
+            .instance = instance.GetInstance(),
+            .physical_device = instance.GetPhysicalDevice(),
+            .device = instance.GetDevice(),
+            .queue = instance.GetHeadsetQueue(),
+            .queue_family = instance.GetGraphicsQueueFamilyIndex(),
+            .queue_index = instance.GetHeadsetQueueIndex(),
+        });
+    }
+#endif
 
     ImGui::Layer::AddLayer(Common::Singleton<Core::Devtools::Layer>::Instance());
-    ImGui::Friends::Register();
-    ImGui::ShadNetNotify::Register();
-    ImGui::InvitationPrompt::Register();
 }
 
 Presenter::~Presenter() {
-    ImGui::InvitationPrompt::Unregister();
-    ImGui::ShadNetNotify::Unregister();
-    ImGui::Friends::Unregister();
     ImGui::Layer::RemoveLayer(Common::Singleton<Core::Devtools::Layer>::Instance());
 
     draw_scheduler.Finish();
@@ -536,7 +554,13 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
     }
 
     const vk::Format format = swapchain.GetSurfaceFormat().format;
+    // Naming the format the views will have lets the driver keep the image compressed.
+    const vk::ImageFormatListCreateInfo format_list = {
+        .viewFormatCount = 1,
+        .pViewFormats = &format,
+    };
     const vk::ImageCreateInfo image_info = {
+        .pNext = &format_list,
         .flags = vk::ImageCreateFlagBits::eMutableFormat,
         .imageType = vk::ImageType::e2D,
         .format = format,
@@ -592,11 +616,28 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
 }
 
 Frame* Presenter::PrepareLastFrame() {
-    if (last_submit_frame == nullptr) {
+    // Once presented, a frame goes back to the pool and from there to the renderer, for the next
+    // picture. It can only be shown again while it is still in the pool, and it is taken out of
+    // it for as long as that takes: a renderer that starts on the frame half way through
+    // replaces the tick its presentation waits for, and a presentation that waits for a tick
+    // nobody will ever submit blocks the queue, and with it the emulator, for good.
+    Frame* frame = nullptr;
+    {
+        std::scoped_lock lock{free_mutex};
+        const size_t count = last_submit_frame != nullptr ? free_queue.size() : 0;
+        for (size_t i = 0; i < count; ++i) {
+            Frame* const candidate = free_queue.front();
+            free_queue.pop();
+            if (candidate == last_submit_frame && frame == nullptr) {
+                frame = candidate;
+            } else {
+                free_queue.push(candidate);
+            }
+        }
+    }
+    if (frame == nullptr) {
         return nullptr;
     }
-
-    Frame* frame = last_submit_frame;
 
     while (true) {
         vk::Result result = instance.GetDevice().waitForFences(frame->present_done, false,
@@ -607,8 +648,15 @@ Frame* Presenter::PrepareLastFrame() {
         if (result == vk::Result::eTimeout) {
             continue;
         }
-        ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
-                   "Device lost during waiting for a frame");
+        if (result == vk::Result::eErrorDeviceLost) {
+            // Soft-fail: hard ASSERT became exit 133 on Mali after first game frame.
+            // Returning the frame lets Present discover device-lost on acquire/present.
+            LOG_CRITICAL(Render_Vulkan, "Device lost during waiting for a frame (PrepareLastFrame)");
+            break;
+        }
+        LOG_ERROR(Render_Vulkan, "Unexpected waitForFences result in PrepareLastFrame: {}",
+                  vk::to_string(result));
+        break;
     }
 
     auto& scheduler = flip_scheduler;
@@ -639,6 +687,7 @@ Frame* Presenter::PrepareLastFrame() {
     });
 
     // Flush frame creation commands.
+    frame->ready_timeline = scheduler.GetWorkSemaphore();
     frame->ready_semaphore = scheduler.GetWorkSemaphore()->Handle();
     frame->ready_tick = scheduler.CurrentTick();
     SubmitInfo info{};
@@ -647,6 +696,18 @@ Frame* Presenter::PrepareLastFrame() {
 }
 
 static vk::Format GetFrameViewFormat(const Libraries::VideoOut::PixelFormat format) {
+#ifdef ENABLE_BACHATA_RUNTIME
+    // The embedded X11 server's DRI3 path exposes the guest frame with the opposite R/B
+    // memory order from desktop WSI. Compensate in the sampled image view.
+    switch (format) {
+    case Libraries::VideoOut::PixelFormat::A8B8G8R8Srgb:
+        return vk::Format::eB8G8R8A8Srgb;
+    case Libraries::VideoOut::PixelFormat::A8R8G8B8Srgb:
+        return vk::Format::eR8G8B8A8Srgb;
+    default:
+        break;
+    }
+#endif
     switch (format) {
     case Libraries::VideoOut::PixelFormat::A8B8G8R8Srgb:
         return vk::Format::eR8G8B8A8Srgb;
@@ -670,6 +731,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     texture_cache.UpdateImage(image_id);
 
     Frame* frame = GetRenderFrame();
+    if (!frame) {
+        return nullptr;
+    }
 
     const auto frame_subresources = vk::ImageSubresourceRange{
         .aspectMask = vk::ImageAspectFlagBits::eColor,
@@ -708,43 +772,30 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
 
     const u32 capture_game_only_count = VideoCore::ConsumeGameOnlyScreenshotRequests();
-    std::optional<ScreenshotReadback> pending_screenshot;
-
-    // Capture the guest output before any host-side scaling (FSR/PP) is applied.
+    std::vector<ScreenshotReadback> pending_screenshots;
     if (capture_game_only_count > 0) {
+        pending_screenshots.reserve(1);
         const bool hdr_encoded =
             attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Bt2020Pq;
-        auto& readback = pending_screenshot.emplace(
+        pending_screenshots.emplace_back(
             instance, ScreenshotKind::GameOnly,
             BuildScreenshotPaths(ScreenshotKind::GameOnly, capture_game_only_count),
             image_size.width, image_size.height, view_info.format, hdr_encoded);
-        const vk::BufferImageCopy copy_region = {
-            .bufferOffset = 0,
-            .bufferRowLength = 0,
-            .bufferImageHeight = 0,
-            .imageSubresource{
-                .aspectMask = vk::ImageAspectFlagBits::eColor,
-                .mipLevel = 0,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-            .imageOffset = {0, 0, 0},
-            .imageExtent = {readback.width, readback.height, 1},
-        };
-        runtime.DownloadImage(&image, &readback.buffer, std::span{&copy_region, 1});
+        auto& readback = pending_screenshots.back();
+
+        // Capture the guest output before any host-side scaling (FSR/PP) is applied.
+        runtime.Transit(&image, vk::ImageLayout::eTransferSrcOptimal, vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead);
+    runtime.FlushBarriers();
+        CopyImageToReadback(cmdbuf, image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                            readback);
     }
 
     // Continue with host-side passes that draw the displayed (scaled) frame.
-
-    runtime.Transit(&image, vk::ImageLayout::eShaderReadOnlyOptimal,
-                    vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead);
+    runtime.Transit(&image, vk::ImageLayout::eShaderReadOnlyOptimal, vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead);
     runtime.FlushBarriers();
 
     image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
                                  fsr_settings, frame->is_hdr);
-
-    // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
-    // the post process pass still sRGB encoded and has to be decoded there instead.
     pp_settings.srgb_input =
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
     pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
@@ -752,14 +803,16 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     DebugState.game_resolution = {image_size.width, image_size.height};
     DebugState.output_resolution = {frame->width, frame->height};
 
-    if (pending_screenshot) {
+    std::shared_ptr<std::vector<ScreenshotReadback>> deferred_screenshots{};
+    if (!pending_screenshots.empty()) {
+        deferred_screenshots =
+            std::make_shared<std::vector<ScreenshotReadback>>(std::move(pending_screenshots));
         draw_scheduler.DeferPriorityOperation(
-            [deferred_screenshot = std::move(pending_screenshot)]() {
-                SavePendingScreenshot(deferred_screenshot.value());
-            });
+            [deferred_screenshots]() { for (const auto& shot : *deferred_screenshots) SavePendingScreenshot(shot); });
     }
 
     // Flush frame creation commands.
+    frame->ready_timeline = draw_scheduler.GetWorkSemaphore();
     frame->ready_semaphore = draw_scheduler.GetWorkSemaphore()->Handle();
     frame->ready_tick = draw_scheduler.CurrentTick();
     SubmitInfo info{};
@@ -767,9 +820,313 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     return frame;
 }
 
+HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textures,
+                                     const Core::Vr::Fov& fov, u32 frame_id, u32& eye_width,
+                                     u32& eye_height, bool packed_stereo,
+                                     const std::optional<std::array<AmdGpu::Image, 2>>& overlay_textures,
+                                     const std::array<std::array<float, 4>, 2>& overlay_uv) {
+    // The guest hands the eyes over as plain textures; they were rendered as color targets, so
+    // the cache already holds their contents.
+    std::array<VideoCore::TextureCache::ImageDesc, 2> descs;
+    std::array<VideoCore::ImageId, 2> image_ids;
+    for (u32 eye = 0; eye < 2; ++eye) {
+        descs[eye] = VideoCore::TextureCache::ImageDesc{eye_textures[eye], Shader::ImageResource{}};
+        image_ids[eye] = texture_cache.FindImage(descs[eye]);
+        texture_cache.UpdateImage(image_ids[eye]);
+    }
+
+    std::array<VideoCore::TextureCache::ImageDesc, 2> overlay_descs;
+    std::array<VideoCore::ImageId, 2> overlay_ids{};
+    if (overlay_textures) {
+        for (u32 eye = 0; eye < 2; ++eye) {
+            overlay_descs[eye] = {(*overlay_textures)[eye], Shader::ImageResource{}};
+            overlay_ids[eye] = texture_cache.FindImage(overlay_descs[eye]);
+            texture_cache.UpdateImage(overlay_ids[eye]);
+        }
+    }
+
+    static u32 logged_frames = 0;
+    if (logged_frames < 3 || (logged_frames % 600) == 0) {
+        for (u32 eye = 0; eye < 2; ++eye) {
+            const auto& image = texture_cache.GetImage(image_ids[eye]);
+            LOG_INFO(Render_Vulkan,
+                     "HMD frame {} eye {}: image {} at {:#x}, {}x{}, format {}, samples {}, "
+                     "flags {:#x}",
+                     frame_id, eye, image_ids[eye].index, image.info.guest_address,
+                     image.info.size.width, image.info.size.height,
+                     vk::to_string(image.info.pixel_format), image.info.num_samples,
+                     static_cast<u32>(image.flags));
+        }
+    }
+    ++logged_frames;
+
+    const auto& left_info = texture_cache.GetImage(image_ids[0]).info;
+    eye_width = packed_stereo ? left_info.size.width / 2 : left_info.size.width;
+    eye_height = left_info.size.height;
+
+    // With a VR host attached the frame goes into one of its buffers instead of the window. A
+    // headset of the machine's own gets a frame of its own next to the window's: the eyes'
+    // pictures at their full size, where the window only has a look at them.
+    Frame* frame = vr_exporter->Acquire(swapchain.GetSurfaceFormat().format);
+    const bool exported = frame != nullptr;
+    static const auto desktop_view = [] {
+        const char* value = std::getenv("SHADPS4_VR_DESKTOP_VIEW");
+        return Core::Vr::ParseDesktopView(value != nullptr ? value : "");
+    }();
+    const bool spectator = desktop_view != Core::Vr::DesktopView::Stereo && !exported;
+    static const bool desktop_crop = [] {
+        const char* value = std::getenv("SHADPS4_VR_DESKTOP_CROP");
+        return value != nullptr && std::string_view{value} == "1";
+    }();
+    const bool crop = spectator && desktop_crop;
+    const float desktop_aspect = Core::Vr::DesktopViewAspect(
+        desktop_view, fov, static_cast<float>(eye_width) / eye_height);
+    Frame* const local = exported ? nullptr : vr_exporter->AcquireLocal(eye_width * 2, eye_height);
+    if (!exported) {
+        expected_ratio = crop ? std::nullopt : std::optional{desktop_aspect};
+        static const double window_fps = [] {
+            const char* value = std::getenv("SHADPS4_VR_WINDOW_FPS");
+            const double rate = value ? std::atof(value) : 60.0;
+            const double result = std::isfinite(rate) ? std::clamp(rate, 0.0, 1000.0) : 60.0;
+            LOG_INFO(Render_Vulkan, "Desktop mirror cap: {} FPS (headset rate independent)",
+                     result);
+            return result;
+        }();
+        if (mirror_limiter.Due(std::chrono::steady_clock::now(), local != nullptr, window_fps)) {
+            frame = GetRenderFrame();
+        }
+        if (!frame && !local) {
+            return {};
+        }
+    }
+
+    draw_scheduler.EndRendering();
+    const auto cmdbuf = draw_scheduler.CommandBuffer();
+    boost::container::static_vector<vk::ImageMemoryBarrier2, 2> pre_barriers;
+    for (const Frame* target : {frame, local}) {
+        if (target == nullptr) {
+            continue;
+        }
+        pre_barriers.push_back(vk::ImageMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+            .srcAccessMask = vk::AccessFlagBits2::eColorAttachmentRead,
+            .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+            .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eColorAttachmentOptimal,
+            .image = target->image,
+            .subresourceRange{
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = VK_REMAINING_ARRAY_LAYERS,
+            },
+        });
+    }
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .imageMemoryBarrierCount = static_cast<u32>(pre_barriers.size()),
+        .pImageMemoryBarriers = pre_barriers.data(),
+    });
+
+    const u32 capture_count = VideoCore::ConsumeGameOnlyScreenshotRequests();
+    std::vector<ScreenshotReadback> hmd_screenshots;
+    if (capture_count > 0) {
+        hmd_screenshots.reserve(4);
+        const auto capture_source = [&](VideoCore::ImageId id, std::string_view label, u32 eye) {
+            auto& image = texture_cache.GetImage(id);
+            const auto format = image.info.pixel_format;
+            if (image.info.num_samples != 1 ||
+                (format != vk::Format::eR8G8B8A8Unorm &&
+                 format != vk::Format::eR8G8B8A8Srgb &&
+                 format != vk::Format::eB8G8R8A8Unorm &&
+                 format != vk::Format::eB8G8R8A8Srgb)) {
+                LOG_WARNING(Render_Vulkan, "HMD screenshot {} {} unsupported format {} samples {}",
+                            label, eye, vk::to_string(format), image.info.num_samples);
+                return;
+            }
+            auto paths = BuildScreenshotPaths(ScreenshotKind::GameOnly, capture_count);
+            for (auto& path : paths) {
+                path = path.parent_path() /
+                       fmt::format("{}_{}_{}.png", path.stem().string(), label, eye);
+            }
+            hmd_screenshots.emplace_back(instance, ScreenshotKind::GameOnly, std::move(paths),
+                                         image.info.size.width, image.info.size.height, format, false);
+            runtime.Transit(&image, vk::ImageLayout::eTransferSrcOptimal,
+                            vk::PipelineStageFlagBits2::eTransfer,
+                            vk::AccessFlagBits2::eTransferRead);
+            runtime.FlushBarriers();
+            CopyImageToReadback(cmdbuf, image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                                hmd_screenshots.back());
+            LOG_INFO(Render_Vulkan, "HMD screenshot {} {} image {} at {:#x}", label, eye,
+                     id.index, image.info.guest_address);
+        };
+        for (u32 eye = 0; eye < 2; ++eye) {
+            capture_source(image_ids[eye], "eye", eye);
+            if (overlay_textures) {
+                capture_source(overlay_ids[eye], "overlay", eye);
+            }
+        }
+    }
+
+    std::array<vk::ImageView, 2> eye_views;
+    for (u32 eye = 0; eye < 2; ++eye) {
+        auto view_info = descs[eye].view_info;
+        // Exclude alpha from output frame to avoid blending with UI.
+        view_info.mapping.a = AmdGpu::CompSwizzle::One;
+
+        auto& image = texture_cache.GetImage(image_ids[eye]);
+        runtime.Transit(&image, vk::ImageLayout::eShaderReadOnlyOptimal, vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead);
+    runtime.FlushBarriers();
+        eye_views[eye] = *image.FindView(view_info).image_view;
+    }
+    std::array<vk::ImageView, 2> overlay_views{};
+    if (overlay_textures) {
+        for (u32 eye = 0; eye < 2; ++eye) {
+            auto& image = texture_cache.GetImage(overlay_ids[eye]);
+            runtime.Transit(&image, vk::ImageLayout::eShaderReadOnlyOptimal, vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead);
+    runtime.FlushBarriers();
+            overlay_views[eye] = *image.FindView(overlay_descs[eye].view_info).image_view;
+        }
+    }
+    // Left eye on the left half, right eye on the right half.
+    const auto regions_for = [&](const Frame& target) {
+        const u32 half_width = target.width / 2;
+        std::array<HostPasses::PostProcessingPass::Region, 2> regions;
+        for (u32 eye = 0; eye < 2; ++eye) {
+            regions[eye] = {
+                .input = eye_views[eye],
+                .overlay = overlay_views[eye],
+                .overlay_uv = overlay_uv[eye],
+                .area{
+                    .offset{.x = static_cast<s32>(eye * half_width), .y = 0},
+                    .extent{.width = half_width, .height = target.height},
+                },
+                .source_uv = Core::Vr::EyeSourceUv(packed_stereo, eye),
+            };
+        }
+        return regions;
+    };
+    // The eyes' pictures are shown far larger than they are drawn (a headset's display has
+    // several pixels for each of theirs), which blurs them: SHADPS4_VR_SHARPEN=<0..1> sharpens
+    // them on the way by that much.
+    static const float sharpen = [] {
+        const char* value = std::getenv("SHADPS4_VR_SHARPEN");
+        return value != nullptr ? std::clamp(static_cast<float>(std::atof(value)), 0.0f, 1.0f)
+                                : 0.0f;
+    }();
+    auto hmd_settings = pp_settings;
+    hmd_settings.srgb_input = false;
+    hmd_settings.sharpen = sharpen;
+    if (frame != nullptr) {
+        const auto bounds = Core::Vr::SpectatorContentRect(frame->width, frame->height,
+                                                        desktop_aspect, crop);
+        const vk::Rect2D content{{bounds.x, bounds.y}, {bounds.width, bounds.height}};
+        const vk::Rect2D clip{{bounds.x, std::max(0, bounds.y)},
+                             {bounds.width, std::min(bounds.height, frame->height)}};
+        if (spectator && desktop_view == Core::Vr::DesktopView::Combined) {
+            const auto layout = Core::Vr::CombinedEyeRegions(content.extent.width, fov);
+            const auto region_for = [&](u32 eye) {
+                const auto& region = layout[eye];
+                return HostPasses::PostProcessingPass::Region{
+                    .input = eye_views[eye],
+                .overlay = overlay_views[eye],
+                .overlay_uv = overlay_uv[eye],
+                    .area{
+                        .offset{.x = content.offset.x + static_cast<s32>(region.x),
+                                .y = content.offset.y},
+                        .extent{.width = region.width, .height = content.extent.height},
+                    },
+                    .clip =
+                        vk::Rect2D{
+                            .offset{.x = content.offset.x + static_cast<s32>(region.clip_x),
+                                    .y = clip.offset.y},
+                            .extent{.width = region.clip_width, .height = clip.extent.height},
+                        },
+                    .source_uv = Core::Vr::EyeSourceUv(packed_stereo, eye),
+                };
+            };
+            const std::array regions{region_for(0), region_for(1)};
+            const auto count = layout[1].clip_width == 0 ? 1u : 2u;
+            pp_pass.Render(cmdbuf, std::span{regions}.first(count), *frame, hmd_settings);
+        } else if (spectator) {
+            const std::array regions{
+                HostPasses::PostProcessingPass::Region{.input = eye_views[0],
+                                                       .overlay = overlay_views[0],
+                                                       .overlay_uv = overlay_uv[0],
+                                                       .area = content,
+                                                       .clip = clip,
+                                                       .source_uv =
+                                                           Core::Vr::EyeSourceUv(packed_stereo, 0)},
+            };
+            pp_pass.Render(cmdbuf, regions, *frame, hmd_settings);
+        } else {
+            pp_pass.Render(cmdbuf, regions_for(*frame), *frame, hmd_settings,
+                           exported ? std::nullopt : std::optional<u32>{frame_id});
+        }
+        if (exported) {
+            vr_exporter->Finalize(frame, cmdbuf);
+        }
+        DebugState.output_resolution = {frame->width, frame->height};
+    }
+    if (local != nullptr) {
+        // An image that encodes for display itself.
+        auto local_settings = hmd_settings;
+        local_settings.linear_out = 1;
+        hmd_pp_pass.Render(cmdbuf, regions_for(*local), *local, local_settings);
+        DebugState.output_resolution = {local->width, local->height};
+    }
+    DebugState.game_resolution = {eye_width * 2, eye_height};
+
+    if (!hmd_screenshots.empty()) {
+        auto screenshots =
+            std::make_shared<std::vector<ScreenshotReadback>>(std::move(hmd_screenshots));
+        draw_scheduler.DeferOperation([screenshots]() {
+            for (const auto& shot : *screenshots) {
+                SavePendingScreenshot(shot);
+            }
+        });
+    }
+
+    // Flush frame creation commands.
+    for (Frame* target : {frame, local}) {
+        if (target != nullptr) {
+            target->ready_timeline = draw_scheduler.GetWorkSemaphore();
+            target->ready_semaphore = draw_scheduler.GetWorkSemaphore()->Handle();
+            target->ready_tick = draw_scheduler.CurrentTick();
+        }
+    }
+    SubmitInfo info{};
+    draw_scheduler.Flush(info);
+    return {.shown = frame, .exported = local};
+}
+
+bool Presenter::IsFrameFinished(const Frame* frame) {
+    return frame == nullptr || draw_scheduler.IsFree(frame->ready_tick);
+}
+
+bool Presenter::IsGpuBusy() {
+    // The tick being recorded has not been handed to the GPU yet; the one before it has.
+    const u64 recording = draw_scheduler.CurrentTick();
+    return recording > 1 && !draw_scheduler.IsFree(recording - 1);
+}
+
+bool Presenter::DeliverHmdFrame(Frame* frame, const Core::Vr::PresentedFrame& info) {
+    if (frame == nullptr || frame->host_buffer < 0) {
+        return false;
+    }
+    vr_exporter->Deliver(frame, info);
+    return true;
+}
+
+
+
 Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     // Request a free presentation frame.
     Frame* frame = GetRenderFrame();
+    if (!frame) {
+        return nullptr;
+    }
 
     auto& scheduler = present_thread ? present_scheduler : draw_scheduler;
     scheduler.EndRendering();
@@ -833,6 +1190,7 @@ Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     });
 
     // Flush frame creation commands.
+    frame->ready_timeline = scheduler.GetWorkSemaphore();
     frame->ready_semaphore = scheduler.GetWorkSemaphore()->Handle();
     frame->ready_tick = scheduler.CurrentTick();
     SubmitInfo info{};
@@ -840,15 +1198,68 @@ Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     return frame;
 }
 
-void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame) {
-    // Free the frame for reuse
+void Presenter::Present(Frame* frame, bool is_reusing_frame) {
+    static std::atomic_uint32_t present_traces{};
+    const u32 trace_id = present_traces.fetch_add(1, std::memory_order_relaxed);
+
+    // Bachata diagnostics: dump the guest output buffer every N presents when
+    // the file <UserDir>/auto_shot_every exists (device black-screen triage;
+    // env vars cannot be injected into the app-spawned runtime).
+    static const u32 shot_every = [] {
+        std::error_code ec;
+        const auto shot_flag =
+            Common::FS::GetUserPath(Common::FS::PathType::UserDir) / "auto_shot_every";
+        if (std::filesystem::exists(shot_flag, ec)) {
+            Common::FS::IOFile f(shot_flag, Common::FS::FileAccessMode::Read);
+            std::array<char, 16> buf{};
+            const auto n = f.ReadRaw<char>(buf.data(), buf.size() - 1);
+            buf[n] = '\0';
+            const u32 v = std::strtoul(buf.data(), nullptr, 10);
+            LOG_INFO(Render_Vulkan, "BACHATA_AUTO_SHOT every={} presents", v);
+            return v;
+        }
+        return 0u;
+    }();
+    if (shot_every > 0 && trace_id > 0 && trace_id % shot_every == 0) {
+        VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::GameOnly);
+        VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::WithOverlays);
+    }
+    // SHADPS4_SHOT_SECONDS=<n>[,<from>]: a picture every n seconds by the clock instead (from
+    // so many seconds in), so that runs at different frame rates can be compared moment by
+    // moment.
+    {
+        using Clock = std::chrono::steady_clock;
+        static double shot_from = 0.0;
+        static const double shot_seconds = [] {
+            const char* value = std::getenv("SHADPS4_SHOT_SECONDS");
+            if (value == nullptr) {
+                return 0.0;
+            }
+            if (const char* comma = std::strchr(value, ','); comma != nullptr) {
+                shot_from = std::atof(comma + 1);
+            }
+            return std::atof(value);
+        }();
+        static const auto shot_start = Clock::now();
+        static u32 shots_taken = 0;
+        if (shot_seconds > 0.0 &&
+            std::chrono::duration<double>(Clock::now() - shot_start).count() >=
+                shot_from + shot_seconds * (shots_taken + 1)) {
+            ++shots_taken;
+            VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::WithOverlays);
+        }
+    }
+    // Log first 64, then every 16th, always around suspected 32-present boundary.
+    const bool trace = trace_id < 64 || (trace_id % 16u) == 0u ||
+                       (trace_id >= 28 && trace_id <= 40);
+    // Free the frame for reuse. One that was shown again was taken out of the pool for that.
     const auto free_frame = [&] {
+        std::scoped_lock fl{free_mutex};
         if (!is_reusing_frame) {
             last_submit_frame = frame;
-            std::scoped_lock fl{free_mutex};
-            free_queue.push(frame);
-            free_cv.notify_one();
         }
+        free_queue.push(frame);
+        free_cv.notify_one();
     };
 
     // Recreate the swapchain if the window was resized.
@@ -865,11 +1276,32 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             return;
         }
     }
+    if (trace) {
+        LOG_INFO(Render_Vulkan, "BACHATA_PRESENT_TRACE id={} stage=acquire_done", trace_id);
+        LOG_INFO(Render_Vulkan,
+                 "FRAME_SLOT_ACQUIRE presentId={} slot={} frameW={} frameH={} "
+                 "swapchainFrameIndex={} swapchainImageCount={} readyTick={}",
+                 trace_id, frame ? int(frame->id) : -1, frame ? frame->width : 0,
+                 frame ? frame->height : 0, swapchain.GetFrameIndex(), swapchain.GetImageCount(),
+                 frame ? frame->ready_tick : 0);
+    }
 
     // Reset fence for queue submission. Do it here instead of GetRenderFrame() because we may
     // skip frame because of slow swapchain recreation. If a frame skip occurs, we skip signal
     // the frame's present fence and future GetRenderFrame() call will hang waiting for this frame.
+
     const auto reset_result = instance.GetDevice().resetFences(frame->present_done);
+    if (reset_result == vk::Result::eErrorDeviceLost) {
+        LOG_CRITICAL(Render_Vulkan, "Device lost while resetting present done fence");
+        static std::atomic<bool> device_lost_snapshot_logged{false};
+        if (!device_lost_snapshot_logged.exchange(true)) {
+            LOG_CRITICAL(Render_Vulkan,
+                         "DEVICE_LOST_SNAPSHOT where=resetPresentFence presentId={} slot={}",
+                         trace_id, frame ? int(frame->id) : -1);
+        }
+        free_frame();
+        return;
+    }
     ASSERT_MSG(reset_result == vk::Result::eSuccess,
                "Unexpected error resetting present done fence: {}", vk::to_string(reset_result));
 
@@ -881,7 +1313,10 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     auto& scheduler = present_scheduler;
     const auto cmdbuf = scheduler.CommandBuffer();
     const u32 capture_with_overlays_count = VideoCore::ConsumeWithOverlaysScreenshotRequests();
-    std::optional<ScreenshotReadback> pending_screenshot;
+    std::vector<ScreenshotReadback> pending_screenshots;
+    if (capture_with_overlays_count > 0) {
+        pending_screenshots.reserve(1);
+    }
 
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
         cmdbuf.beginDebugUtilsLabelEXT(vk::DebugUtilsLabelEXT{
@@ -914,7 +1349,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             },
             vk::ImageMemoryBarrier{
                 .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
-                .dstAccessMask = vk::AccessFlagBits::eShaderRead,
+                .dstAccessMask = vk::AccessFlagBits::eColorAttachmentRead,
                 .oldLayout = vk::ImageLayout::eGeneral,
                 .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -933,9 +1368,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         bool swapchain_copied_for_screenshot = false;
 
         cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
-                               vk::PipelineStageFlagBits::eColorAttachmentOutput |
-                                   vk::PipelineStageFlagBits::eFragmentShader,
-                               {}, {}, {}, pre_barriers);
+                               vk::PipelineStageFlagBits::eColorAttachmentOutput,
+                               vk::DependencyFlagBits::eByRegion, {}, {}, pre_barriers);
 
         { // Draw the game
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0.0f});
@@ -951,9 +1385,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                 if (Libraries::SystemService::IsSplashVisible()) { // draw splash
                     if (!splash_img.has_value()) {
                         splash_img.emplace();
-                        const auto& splash_data = Common::ElfInfo::Instance().GetSplashData();
-                        if (!splash_data.empty()) {
-                            splash_img = ImGui::RefCountedTexture::DecodePngTexture(splash_data);
+                        const auto& splash_path = Common::ElfInfo::Instance().GetSplashData();
+                        if (!splash_path.empty()) {
+                            splash_img = ImGui::RefCountedTexture::DecodePngTexture(splash_path);
                         }
                     }
                     if (auto& splash_image = this->splash_img.value()) {
@@ -992,13 +1426,14 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         ImGui::Core::Render(cmdbuf, swapchain_image_view, swapchain.GetExtent());
 
         if (capture_with_overlays_count > 0) {
-            auto& readback = pending_screenshot.emplace(
+            pending_screenshots.emplace_back(
                 instance, ScreenshotKind::WithOverlays,
                 BuildScreenshotPaths(ScreenshotKind::WithOverlays, capture_with_overlays_count),
                 extent.width, extent.height,
                 swapchain.GetHDR() ? vk::Format::eA2B10G10R10UnormPack32
                                    : swapchain.GetSurfaceFormat().format,
                 swapchain.GetHDR());
+            auto& readback = pending_screenshots.back();
 
             const vk::ImageMemoryBarrier to_transfer{
                 .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
@@ -1060,29 +1495,56 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     }
 
     // Flush vulkan commands.
-    if (pending_screenshot) {
-        scheduler.DeferPriorityOperation([deferred_screenshot = std::move(pending_screenshot)]() {
-            SavePendingScreenshot(deferred_screenshot.value());
-        });
+    std::shared_ptr<std::vector<ScreenshotReadback>> deferred_screenshots{};
+    if (!pending_screenshots.empty()) {
+        deferred_screenshots =
+            std::make_shared<std::vector<ScreenshotReadback>>(std::move(pending_screenshots));
+        scheduler.DeferPriorityOperation(
+            [deferred_screenshots]() { for (const auto& shot : *deferred_screenshots) SavePendingScreenshot(shot); });
     }
 
     SubmitInfo info{};
-    info.AddWait(swapchain.GetImageAcquiredSemaphore());
+    {
+        info.AddWait(swapchain.GetImageAcquiredSemaphore());
+    }
+#ifdef ENABLE_BACHATA_RUNTIME
+    // The frame has to be finished before it is presented. Drivers that emulate timeline
+    // semaphores (Turnip on the Adreno kernel driver) do that by holding the submission back
+    // while the tick it waits for is still executing, and only look at it again the next time
+    // the application calls them. The renderer may well be waiting for this very presentation
+    // by then, so that call never comes and both stop for good. Waiting here costs the present
+    // thread the time the GPU needs for the frame, and nobody anything else. (Through the
+    // timeline's own wait: the driver must not be asked for ticks out of order.)
+    if (frame->ready_timeline != nullptr) {
+        frame->ready_timeline->Wait(frame->ready_tick);
+    }
+#else
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
-    info.AddSignal(swapchain.GetPresentReadySemaphore());
+#endif
+    {
+        info.AddSignal(swapchain.GetPresentReadySemaphore());
+    }
     info.AddSignal(frame->present_done);
     scheduler.Flush(info);
+    if (trace) {
+        LOG_INFO(Render_Vulkan, "BACHATA_PRESENT_TRACE id={} stage=flush_done", trace_id);
+    }
 
     // Present to swapchain.
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
-        if (!swapchain.Present()) {
+        const bool presented = swapchain.Present();
+        if (trace) {
+            LOG_INFO(Render_Vulkan, "BACHATA_PRESENT_TRACE id={} stage=present_done ok={}", trace_id,
+                     presented);
+        }
+        if (!presented) {
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
     }
 
     free_frame();
-    if (!is_reusing_frame && is_game_frame) {
+    if (!is_reusing_frame) {
         DebugState.IncFlipFrameNum();
     }
 }
@@ -1090,9 +1552,17 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
 Frame* Presenter::GetRenderFrame() {
     // Wait for free presentation frames
     Frame* frame;
+    const bool nonblock =
+        false;
     {
         std::unique_lock lock{free_mutex};
-        free_cv.wait(lock, [this] { return !free_queue.empty(); });
+        if (nonblock) {
+            if (free_queue.empty()) {
+                return nullptr;
+            }
+        } else {
+            free_cv.wait(lock, [this] { return !free_queue.empty(); });
+        }
         LOG_DEBUG(Render_Vulkan, "Got render frame, remaining {}", free_queue.size() - 1);
 
         // Take the frame from the queue
@@ -1103,19 +1573,62 @@ Frame* Presenter::GetRenderFrame() {
     const vk::Device device = instance.GetDevice();
     vk::Result result{};
 
+    static std::atomic_uint32_t get_frame_traces{};
+    const u32 get_id = get_frame_traces.fetch_add(1, std::memory_order_relaxed);
+    if (get_id < 64 || (get_id % 16u) == 0u || (get_id >= 28 && get_id <= 40)) {
+        LOG_INFO(Render_Vulkan,
+                 "GET_RENDER_FRAME_WAIT frameGetId={} slot={} poolSize={} freeRemaining={} "
+                 "readyTick={} (before waitForFences)",
+                 get_id, frame ? int(frame->id) : -1, present_frames.size(), free_queue.size(),
+                 frame ? frame->ready_tick : 0);
+    }
+
+    const u64 timeout_ns = std::numeric_limits<u64>::max();
+
     const auto wait = [&]() {
-        result = device.waitForFences(frame->present_done, false, std::numeric_limits<u64>::max());
+        result = device.waitForFences(frame->present_done, false, timeout_ns);
         return result;
     };
 
     // Wait for the presentation to be finished so all frame resources are free
     while (wait() != vk::Result::eSuccess) {
-        ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
-                   "Device lost during waiting for a frame");
-        // Retry if the waiting times out
         if (result == vk::Result::eTimeout) {
+            if (nonblock) {
+                static std::atomic<u32> defer_count{};
+                if (defer_count.fetch_add(1, std::memory_order_relaxed) % 100 == 0) {
+                    LOG_WARNING(Render_Vulkan,
+                                "GetRenderFrame: present fence busy on GpuComm; deferring flip");
+                }
+                std::scoped_lock relock{free_mutex};
+                free_queue.push(frame);
+                free_cv.notify_one();
+                return nullptr;
+            }
             continue;
         }
+        if (result == vk::Result::eErrorDeviceLost) {
+            // Soft-fail on Mali/Vortek: ASSERT_MSG here was exit 133 after the first
+            // real EOP flip. Return the frame so Present can soft-fail acquire/present
+            // and the session can stop without an immediate trap.
+            // Client-side snapshot header; server dumps live alloc map via
+            // DEVICE_LOST_SNAPSHOT in libbachata_vortek_server (logcat Bachata.Vortek.GpuTrack).
+            static std::atomic<bool> device_lost_snapshot_logged{false};
+            const u32 flip_num = DebugState.GetFrameNum();
+            LOG_CRITICAL(Render_Vulkan, "Device lost during waiting for a frame (GetRenderFrame)");
+            if (!device_lost_snapshot_logged.exchange(true)) {
+                LOG_CRITICAL(Render_Vulkan,
+                             "DEVICE_LOST_SNAPSHOT where=GetRenderFrame lastPresent={} "
+                             "currentFrameId={} frameSize={}x{} hdr={} "
+                             "flipFrameNum={} (server alloc dump in logcat tag "
+                             "Bachata.Vortek.GpuTrack)",
+                             flip_num, frame ? int(frame->id) : -1, frame ? frame->width : 0,
+                             frame ? frame->height : 0, frame && frame->is_hdr ? 1 : 0, flip_num);
+            }
+            break;
+        }
+        LOG_ERROR(Render_Vulkan, "Unexpected waitForFences result in GetRenderFrame: {}",
+                  vk::to_string(result));
+        break;
     }
 
     if (frame->width != expected_frame_width || frame->height != expected_frame_height ||
@@ -1131,10 +1644,12 @@ void Presenter::SetExpectedGameSize(s32 width, s32 height) {
 
     expected_frame_height = height;
     expected_frame_width = width;
-    if (ratio > expected_ratio) {
-        expected_frame_width = static_cast<s32>(height * expected_ratio);
-    } else {
-        expected_frame_height = static_cast<s32>(width / expected_ratio);
+    if (expected_ratio) {
+        if (ratio > *expected_ratio) {
+            expected_frame_width = static_cast<s32>(height * *expected_ratio);
+        } else {
+            expected_frame_height = static_cast<s32>(width / *expected_ratio);
+        }
     }
 }
 

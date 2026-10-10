@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <mutex>
 #include <optional>
 #include <utility>
@@ -93,6 +94,10 @@ public:
     State ReadState();
     int ReadStates(State* states, int states_num);
 
+    void ApplyRemoteState(Libraries::Pad::OrbisPadButtonDataOffset buttons, const std::array<int, 6>& axes, bool touch_down, float touch_x, float touch_y);
+    void ApplyHeadsetState(Libraries::Pad::OrbisPadButtonDataOffset buttons, const std::array<int, 6>& axes, bool touch_down, float touch_x, float touch_y);
+    void SetHeadsetPlays(bool plays);
+    bool HeadsetPlays() const { return m_headset_plays.load(std::memory_order_relaxed); }
     void Button(Libraries::Pad::OrbisPadButtonDataOffset button, bool isPressed);
     void Axis(Input::Axis axis, int value, bool smooth = true);
     void UpdateGyro(const float gyro[3]);
@@ -111,6 +116,8 @@ public:
     SDL_Gamepad* m_sdl_gamepad = nullptr;
 
 private:
+    std::atomic<bool> m_headset_plays{false};
+    Libraries::Pad::OrbisPadButtonDataOffset ApplyRemoteLocked(Libraries::Pad::OrbisPadButtonDataOffset buttons, const std::array<int, 6>& axes, bool touch_down, float touch_x, float touch_y);
     // m_state_mutex must be held by the caller.
     void PushStateLocked(u64 timestamp = 0);
     void UpdateOrientationLocked(u64 timestamp);

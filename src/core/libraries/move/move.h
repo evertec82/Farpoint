@@ -43,5 +43,8 @@ struct OrbisMoveData {
     float temperature;
 };
 
+int HandForHandle(s32 handle);
+bool HasOpenControllerPair();
+
 void RegisterLib(Core::Loader::SymbolsResolver* sym);
 } // namespace Libraries::Move

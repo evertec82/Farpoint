@@ -81,8 +81,11 @@ static u32 BufferImageCopySize(const vk::BufferImageCopy& copy, const vk::Format
     const u32 row_length = copy.bufferRowLength ? copy.bufferRowLength : copy.imageExtent.width;
     const u32 height = copy.bufferImageHeight ? copy.bufferImageHeight : copy.imageExtent.height;
 
-    const auto block = vk::blockExtent(pixel_format);
-    const u32 block_size = vk::blockSize(pixel_format);
+    const auto aspect_format = copy.imageSubresource.aspectMask == vk::ImageAspectFlagBits::eStencil
+                                   ? vk::Format::eS8Uint
+                                   : pixel_format;
+    const auto block = vk::blockExtent(aspect_format);
+    const u32 block_size = vk::blockSize(aspect_format);
     const u32 row_pitch = (row_length / block[0]) * block_size;
     const u32 slice_pitch = (height / block[1]) * row_pitch;
 
@@ -245,8 +248,8 @@ void Runtime::CopyImage(VideoCore::Image* src, VideoCore::Image* dst) {
 
     SmallVector<vk::ImageCopy, 8> regions;
 
-    const vk::ImageAspectFlags src_aspect = src->aspect_mask & ~vk::ImageAspectFlagBits::eStencil;
-    const vk::ImageAspectFlags dst_aspect = dst->aspect_mask & ~vk::ImageAspectFlagBits::eStencil;
+    const vk::ImageAspectFlags src_aspect = src->TransferAspect();
+    const vk::ImageAspectFlags dst_aspect = dst->TransferAspect();
 
     const bool src_is_2d = ConvertImageType(src->info.type) == vk::ImageType::e2D;
     const bool src_is_3d = ConvertImageType(src->info.type) == vk::ImageType::e3D;
@@ -335,7 +338,7 @@ void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
         .bufferRowLength = 0,
         .bufferImageHeight = 0,
         .imageSubresource{
-            .aspectMask = src->aspect_mask & ~vk::ImageAspectFlagBits::eStencil,
+            .aspectMask = src->TransferAspect(),
             .mipLevel = 0u,
             .baseArrayLayer = 0,
             .layerCount = num_layers,
@@ -373,7 +376,7 @@ void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
         .pMemoryBarriers = &post_copy_barrier,
     });
 
-    buffer_copy.imageSubresource.aspectMask = dst->aspect_mask & ~vk::ImageAspectFlagBits::eStencil;
+    buffer_copy.imageSubresource.aspectMask = dst->TransferAspect();
     cmdbuf.copyBufferToImage(buffer->Handle(), dst->GetImage(),
                              vk::ImageLayout::eTransferDstOptimal, buffer_copy);
 

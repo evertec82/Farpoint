@@ -105,6 +105,13 @@ struct Image : public Common::LRUNode<> {
         return True(flags & ImageFlagBits::GpuModified) && False(flags & ImageFlagBits::Dirty);
     }
 
+    // Guest stencil planes are separate byte arrays even when Vulkan uses a
+    // combined depth/stencil backing image.
+    vk::ImageAspectFlags TransferAspect() const {
+        return info.props.is_stencil_only ? vk::ImageAspectFlagBits::eStencil
+                                         : aspect_mask & ~vk::ImageAspectFlagBits::eStencil;
+    }
+
     void AssociateDepth(ImageId depth_image_id, u64 depth_image_uid) {
         depth_id = depth_image_id;
         depth_uid = depth_image_uid;

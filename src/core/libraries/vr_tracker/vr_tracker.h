@@ -388,7 +388,8 @@ sceVrTrackerUpdateMotionSensorData(const OrbisVrTrackerUpdateMotionSensorDataPar
 s32 PS4_SYSV_ABI Func_0FA4C949F8D3024E();
 s32 PS4_SYSV_ABI Func_285C6AFC09C42F7E();
 s32 PS4_SYSV_ABI Func_9A6CDB2103664F8A();
-s32 PS4_SYSV_ABI Func_B4D26B7D8B18DF06();
+s32 PS4_SYSV_ABI Func_B4D26B7D8B18DF06(const OrbisVrTrackerDeviceType device_type, const s32 handle,
+                                       const s32 led_color);
 s32 PS4_SYSV_ABI sceVrTrackerSetDeviceRejection();
 s32 PS4_SYSV_ABI Func_1119B0BE399F37E7();
 s32 PS4_SYSV_ABI Func_4928B43816BC440D();

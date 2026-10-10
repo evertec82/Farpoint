@@ -1,3 +1,5 @@
+#include "core/vr/vr_runtime.h"
+#include "core/vr/openxr_host.h"
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -82,7 +84,7 @@ Emulator::Emulator() {
     std::at_quick_exit([]() { Common::Singleton<Core::Emulator>::Instance()->Shutdown(); });
 }
 
-Emulator::~Emulator() {}
+Emulator::~Emulator() { Core::Vr::OpenXrHost::Instance().Shutdown(); }
 
 void Emulator::Shutdown() {
     static bool exit_done = false;
@@ -529,6 +531,7 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
         LOG_INFO(Loader, "PSVR Supported: {}", (bool)psf_attributes.support_ps_vr.Value());
         LOG_INFO(Loader, "PSVR Required: {}", (bool)psf_attributes.require_ps_vr.Value());
     }
+
     if (!args.empty()) {
         const auto argc = std::min<size_t>(args.size(), 32);
         for (auto i = 0; i < argc; i++) {
@@ -560,6 +563,8 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
 
     // Initialize components
     memory = Core::Memory::Instance();
+    // Reserve guest address ranges before the OpenXR runtime loads driver mappings.
+    Core::Vr::Runtime::Instance().Configure(psf_attributes.support_ps_vr.Value() != 0, psf_attributes.require_ps_vr.Value() != 0);
     controllers = Common::Singleton<Input::GameControllers>::Instance();
     linker = Common::Singleton<Core::Linker>::Instance();
 

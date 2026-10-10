@@ -1,3 +1,4 @@
+#include <cstring>
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -11,11 +12,13 @@
 #include "core/libraries/kernel/threads/exception.h"
 #include "core/libraries/kernel/threads/pthread.h"
 #include "core/signals.h"
+#include "core/fault_diagnostics.h"
 #include "emulator.h"
 
 #ifdef _WIN32
 #include <windows.h>
 static constexpr DWORD MS_VC_EXCEPTION = 0x406D1388;
+static constexpr DWORD MS_CPP_EXCEPTION = 0xE06D7363;
 #else
 #include <csignal>
 #include <pthread.h>
@@ -53,6 +56,8 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     bool handled = false;
     bool static_protection_exception = false; // Windows static guest red-zone protection
     switch (code) {
+    case MS_CPP_EXCEPTION:
+        return EXCEPTION_CONTINUE_SEARCH;
     case EXCEPTION_ACCESS_VIOLATION:
         guest_info._si_signo = POSIX_SIGSEGV;
         guest_info._si_code = POSIX_SEGV_MAPERR;
@@ -143,6 +148,67 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
         use_static_windows_guest_red_zone_protection ? static_protection_exception : true;
     if (report_unhandled) {
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
+#if defined(ARCH_X86_64)
+        if (pExp && pExp->ContextRecord) {
+            const auto& c = *pExp->ContextRecord;
+            ReportFaultMemory(c);
+            LOG_CRITICAL(Debug,
+                         "Fault context rip={:#x} rsp={:#x} rbp={:#x} rax={:#x} rbx={:#x} "
+                         "rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x} r8={:#x} r9={:#x}",
+                         c.Rip, c.Rsp, c.Rbp, c.Rax, c.Rbx, c.Rcx, c.Rdx, c.Rsi, c.Rdi,
+                         c.R8, c.R9);
+            LOG_CRITICAL(Debug,
+                         "Fault context r10={:#x} r11={:#x} r12={:#x} r13={:#x} r14={:#x} r15={:#x}",
+                         c.R10, c.R11, c.R12, c.R13, c.R14, c.R15);
+            // SysV leaf functions keep live locals below RSP. These include the
+            // saved output pointer in Farpoint's failing index-generation routine.
+            // Only read on a fatal fault; never dereference a possibly damaged stack.
+            if (c.Rsp >= 128) {
+                u64 red_zone[16]{};
+                SIZE_T red_zone_read{};
+                if (ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(c.Rsp - 128),
+                                      red_zone, sizeof(red_zone), &red_zone_read)) {
+                    for (SIZE_T i = 0; i < red_zone_read / sizeof(u64); ++i) {
+                        LOG_CRITICAL(Debug, "Fault stack -{:#x}: {:#x}",
+                                     128 - i * sizeof(u64), red_zone[i]);
+                    }
+                }
+            }
+            // Read safely: an invalid guest stack must not fault the handler again.
+            u64 stack[16]{};
+            SIZE_T bytes_read{};
+            if (ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(c.Rsp),
+                                  stack, sizeof(stack), &bytes_read)) {
+                for (SIZE_T i = 0; i < bytes_read / sizeof(u64); ++i) {
+                    LOG_CRITICAL(Debug, "Fault stack +{:#x}: {:#x}", i * sizeof(u64), stack[i]);
+                }
+            }
+            MEMORY_BASIC_INFORMATION region{};
+            if (VirtualQuery(address, &region, sizeof(region))) {
+                LOG_CRITICAL(Debug, "Fault code region base={} allocation={} size={:#x} "
+                                    "protection={:#x} type={:#x}",
+                             region.BaseAddress, region.AllocationBase, region.RegionSize,
+                             region.Protect, region.Type);
+            }
+        }
+#endif
+
+        // Where it came from: each caller as its module and the place in it.
+        void* frames[32];
+        const USHORT count = CaptureStackBackTrace(0, 32, frames, nullptr);
+        for (USHORT i = 0; i < count; ++i) {
+            HMODULE module = nullptr;
+            char name[MAX_PATH] = "?";
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   static_cast<LPCSTR>(frames[i]), &module)) {
+                GetModuleFileNameA(module, name, sizeof(name));
+            }
+            const char* file = std::strrchr(name, '\\');
+            LOG_CRITICAL(Debug, "  {} + {:#x}", file ? file + 1 : name,
+                         reinterpret_cast<uintptr_t>(frames[i]) -
+                             reinterpret_cast<uintptr_t>(module));
+        }
         Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     }
 

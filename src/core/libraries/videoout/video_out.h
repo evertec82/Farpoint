@@ -3,9 +3,13 @@
 
 #pragma once
 
+#include <array>
+#include <optional>
 #include <core/libraries/system/userservice.h>
 #include "core/libraries/kernel/equeue.h"
 #include "core/libraries/videoout/buffer.h"
+#include "core/vr/vr_runtime.h"
+#include "video_core/amdgpu/resource.h"
 
 namespace Core::Loader {
 class SymbolsResolver;
@@ -39,6 +43,8 @@ constexpr int SCE_VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_NONE = 0;
 constexpr int SCE_VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_VR = 7;
 constexpr int SCE_VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_STRICT_COLORIMETRY = 8;
 
+// The output can be switched to drive a headset. Titles refuse to enter VR without it.
+constexpr int ORBIS_VIDEO_OUT_DEVICE_CAPABILITY_VR_VIEW = 0x20;
 constexpr int ORBIS_VIDEO_OUT_DEVICE_CAPABILITY_BT2020_PQ = 0x80;
 
 enum OrbisVideoOutColorimetry : u8 {
@@ -138,8 +144,24 @@ s32 PS4_SYSV_ABI sceVideoOutGetEventData(const Kernel::OrbisKernelEvent* ev, s64
 s32 PS4_SYSV_ABI sceVideoOutColorSettingsSetGamma(SceVideoOutColorSettings* settings, float gamma);
 s32 PS4_SYSV_ABI sceVideoOutAdjustColor(s32 handle, const SceVideoOutColorSettings* settings);
 
+/// One stereo frame handed to the headset by the HMD reprojection.
+struct HmdFrame {
+    std::array<AmdGpu::Image, 2> eye_textures; ///< Guest texture descriptors, left then right.
+    std::optional<std::array<AmdGpu::Image, 2>> overlay_textures;
+    std::array<std::array<float, 4>, 2> overlay_uv{{{1, 1, 0, 0}, {1, 1, 0, 0}}};
+    bool packed_stereo{}; ///< Both eyes occupy horizontal halves of the same image.
+    Core::Vr::Fov fov;    ///< Field of view the eyes were rendered with.
+    /// Head pose used for rendering: in tracker space as the title hands it in, in the host's
+    /// space once the frame is on its way to the display.
+    Core::Vr::Pose render_pose;
+    s64 flip_arg;
+    s32 display_index; ///< Display buffer the reprojection would scan this frame out from.
+};
+
 // Internal system functions
 s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, void** unk);
+/// Queues a frame for the headset, the way the reprojection scans one out on real hardware.
+s32 SubmitHmdFrame(s32 handle, const HmdFrame& frame);
 
 void RegisterLib(Core::Loader::SymbolsResolver* sym);
 

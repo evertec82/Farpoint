@@ -6,6 +6,7 @@
 #include "core/libraries/error_codes.h"
 #include "core/libraries/hmd/hmd_setup_dialog.h"
 #include "core/libraries/libs.h"
+#include "core/vr/vr_runtime.h"
 
 namespace Libraries::HmdSetupDialog {
 
@@ -26,10 +27,12 @@ s32 PS4_SYSV_ABI sceHmdSetupDialogOpen(const OrbisHmdSetupDialogParam* param) {
 }
 
 s32 PS4_SYSV_ABI sceHmdSetupDialogGetResult(OrbisHmdSetupDialogResult* result) {
-    LOG_ERROR(Lib_HmdSetupDialog, "(STUBBED) called");
-    // Simulates behavior of user pressing circle to cancel the dialog.
-    // Result::OK would mean a headset was connected.
-    result->result = Libraries::CommonDialog::Result::USER_CANCELED;
+    LOG_DEBUG(Lib_HmdSetupDialog, "called");
+    // Result::OK means a headset was connected. Without one, simulate the user pressing circle
+    // to cancel the dialog.
+    result->result = Core::Vr::Runtime::Instance().IsHeadsetConnected()
+                         ? Libraries::CommonDialog::Result::OK
+                         : Libraries::CommonDialog::Result::USER_CANCELED;
     return ORBIS_OK;
 }
 

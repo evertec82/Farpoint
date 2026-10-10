@@ -7,6 +7,7 @@
 #include "core/emulator_settings.h"
 #include "video_core/host_shaders/fs_tri_vert.h"
 #include "video_core/host_shaders/post_process_frag.h"
+#include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -15,18 +16,30 @@
 
 namespace Vulkan::HostPasses {
 
-void PostProcessingPass::Create(vk::Device device, const vk::Format surface_format) {
+void PostProcessingPass::Create(const Instance& instance, Semaphore* master_semaphore,
+                                const vk::Format surface_format) {
+    device = instance.GetDevice();
+    uses_push_descriptors = true;
+    desc_heap = std::make_unique<DescriptorHeap>(instance, master_semaphore, pool_sizes, 64);
+    static const std::array pp_shaders{
+        std::span<const u32>{FS_TRI_VERT},
+        std::span<const u32>{POST_PROCESS_FRAG},
+    };
+
     boost::container::static_vector<vk::DescriptorSetLayoutBinding, 2> bindings{
         {
             .binding = 0,
             .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-            .descriptorCount = 1,
+            .descriptorCount = 2,
             .stageFlags = vk::ShaderStageFlagBits::eFragment,
         },
     };
 
+    const vk::DescriptorSetLayoutCreateFlags layout_flags =
+        uses_push_descriptors ? vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR
+                              : vk::DescriptorSetLayoutCreateFlagBits{};
     const vk::DescriptorSetLayoutCreateInfo desc_layout_ci{
-        .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
+        .flags = layout_flags,
         .bindingCount = static_cast<u32>(bindings.size()),
         .pBindings = bindings.data(),
     };
@@ -40,11 +53,11 @@ void PostProcessingPass::Create(vk::Device device, const vk::Format surface_form
         .size = sizeof(Settings),
     };
 
-    const auto& vs_module = CompileSPV(FS_TRI_VERT, device);
+    const auto& vs_module = CompileSPV(pp_shaders[0], device);
     ASSERT(vs_module);
     SetObjectName(device, vs_module, "fs_tri.vert");
 
-    const auto& fs_module = CompileSPV(POST_PROCESS_FRAG, device);
+    const auto& fs_module = CompileSPV(pp_shaders[1], device);
     ASSERT(fs_module);
     SetObjectName(device, fs_module, "post_process.frag");
 
@@ -183,6 +196,17 @@ void PostProcessingPass::Create(vk::Device device, const vk::Format surface_form
 
 void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
                                 vk::Extent2D input_size, Frame& frame, Settings settings) {
+    const std::array regions{
+        Region{
+            .input = input,
+            .area{.extent{.width = frame.width, .height = frame.height}},
+        },
+    };
+    Render(cmdbuf, regions, frame, settings);
+}
+
+void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, std::span<const Region> regions,
+                                Frame& frame, Settings settings, std::optional<u32> marker) {
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
         cmdbuf.beginDebugUtilsLabelEXT(vk::DebugUtilsLabelEXT{
             .pLabelName = "Host/Post processing",
@@ -214,48 +238,99 @@ void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
         .pColorAttachments = attachments.data(),
     };
 
-    vk::DescriptorImageInfo image_info{
-        .sampler = *sampler,
-        .imageView = input,
-        .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-    };
-
-    const std::array set_writes{
-        vk::WriteDescriptorSet{
-            .dstSet = VK_NULL_HANDLE,
-            .dstBinding = 0,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-            .pImageInfo = &image_info,
-        },
-    };
-
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, *pipeline);
-
-    const std::array viewports = {
-        vk::Viewport{
-            .width = static_cast<float>(frame.width),
-            .height = static_cast<float>(frame.height),
-            .minDepth = 0.0f,
-            .maxDepth = 1.0f,
-        },
-    };
-
-    cmdbuf.setViewport(0, viewports);
-    cmdbuf.setScissor(0, vk::Rect2D{
-                             .extent{
-                                 .width = frame.width,
-                                 .height = frame.height,
-                             },
-                         });
-
-    cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, *pipeline_layout, 0, set_writes);
     cmdbuf.pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(Settings),
                          &settings);
 
+    // Without push descriptors the sets have to be written before rendering begins.
+    boost::container::static_vector<vk::DescriptorSet, 4> desc_sets;
+    if (!uses_push_descriptors) {
+        for (const Region& region : regions) {
+            const std::array<vk::DescriptorImageInfo, 2> image_info{{
+                {*sampler, region.input, vk::ImageLayout::eShaderReadOnlyOptimal},
+                {*sampler, region.overlay ? region.overlay : region.input,
+                 vk::ImageLayout::eShaderReadOnlyOptimal},
+            }};
+            const auto desc_set = desc_heap->Commit(*desc_set_layout);
+            device.updateDescriptorSets(
+                vk::WriteDescriptorSet{
+                    .dstSet = desc_set,
+                    .dstBinding = 0,
+                    .dstArrayElement = 0,
+                    .descriptorCount = 2,
+                    .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+                    .pImageInfo = image_info.data(),
+                },
+                {});
+            desc_sets.push_back(desc_set);
+        }
+    }
+
     cmdbuf.beginRendering(rendering_info);
-    cmdbuf.draw(3, 1, 0, 0);
+    for (size_t i = 0; i < regions.size(); ++i) {
+        const Region& region = regions[i];
+        settings.source_uv = region.source_uv;
+        settings.has_overlay = region.overlay ? 1 : 0;
+        settings.overlay_uv = region.overlay_uv;
+        cmdbuf.pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eFragment, 0,
+                             sizeof(Settings), &settings);
+        cmdbuf.setViewport(0, vk::Viewport{
+                                  .x = static_cast<float>(region.area.offset.x),
+                                  .y = static_cast<float>(region.area.offset.y),
+                                  .width = static_cast<float>(region.area.extent.width),
+                                  .height = static_cast<float>(region.area.extent.height),
+                                  .minDepth = 0.0f,
+                                  .maxDepth = 1.0f,
+                              });
+        cmdbuf.setScissor(0, region.clip.value_or(region.area));
+
+        if (uses_push_descriptors) {
+            const std::array<vk::DescriptorImageInfo, 2> image_info{{
+                {*sampler, region.input, vk::ImageLayout::eShaderReadOnlyOptimal},
+                {*sampler, region.overlay ? region.overlay : region.input,
+                 vk::ImageLayout::eShaderReadOnlyOptimal},
+            }};
+            cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, *pipeline_layout, 0,
+                                        vk::WriteDescriptorSet{
+                                            .dstSet = VK_NULL_HANDLE,
+                                            .dstBinding = 0,
+                                            .dstArrayElement = 0,
+                                            .descriptorCount = 2,
+                                            .descriptorType =
+                                                vk::DescriptorType::eCombinedImageSampler,
+                                            .pImageInfo = image_info.data(),
+                                        });
+        } else {
+            cmdbuf.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, *pipeline_layout, 0,
+                                      desc_sets[i], {});
+        }
+        cmdbuf.draw(3, 1, 0, 0);
+    }
+
+    if (marker && frame.width >= MarkerBlocks * MarkerBlockSize &&
+        frame.height >= MarkerBlockSize) {
+        const u32 id = *marker & ((1u << MarkerIdBits) - 1);
+        // Sync blocks first (white, black), then the id and its check value.
+        const u64 bits = 0b01ULL | (u64{id} << MarkerSyncBlocks) |
+                         (u64{MarkerCheck(id)} << (MarkerSyncBlocks + MarkerIdBits));
+        for (u32 block = 0; block < MarkerBlocks; ++block) {
+            const float level = ((bits >> block) & 1) != 0 ? 1.0f : 0.0f;
+            const vk::ClearAttachment clear{
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .colorAttachment = 0,
+                .clearValue{.color{std::array{level, level, level, 1.0f}}},
+            };
+            const vk::ClearRect rect{
+                .rect{
+                    .offset{.x = static_cast<s32>(block * MarkerBlockSize), .y = 0},
+                    .extent{.width = MarkerBlockSize, .height = MarkerBlockSize},
+                },
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            };
+            cmdbuf.clearAttachments(clear, rect);
+        }
+    }
     cmdbuf.endRendering();
 
     const auto post_barrier = vk::ImageMemoryBarrier2{

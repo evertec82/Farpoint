@@ -21,6 +21,9 @@ namespace Vulkan {
 
 class Instance {
 public:
+    vk::Queue GetHeadsetQueue() const { return headset_queue; }
+    u32 GetHeadsetQueueIndex() const { return headset_queue_index; }
+public:
     explicit Instance(bool validation = false, bool crash_diagnostic = false);
     explicit Instance(Frontend::WindowSDL& window, s32 physical_device_index,
                       bool enable_validation = false, bool enable_crash_diagnostic = false);
@@ -459,6 +462,8 @@ public:
     }
 
     /// Returns the amount of memory used.
+    void ReportDeviceFault() const;
+
     [[nodiscard]] u64 GetDeviceMemoryUsage() const;
 
     /// Returns the total memory budget available to the device.
@@ -510,6 +515,8 @@ private:
     std::string vendor_name;
     VmaAllocator allocator{};
     vk::Queue present_queue;
+    vk::Queue headset_queue;
+    u32 headset_queue_index{};
     vk::Queue graphics_queue;
     std::vector<vk::PhysicalDevice> physical_devices;
     std::vector<std::string> available_extensions;
@@ -542,6 +549,7 @@ private:
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};
     bool shader_clock{};
+    bool device_fault{};
     bool supports_memory_budget{};
     bool supports_block_texel_view{};
     u64 total_memory_budget{};

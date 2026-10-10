@@ -21,6 +21,8 @@ enum class PixelFormat : u32 {
     A2R10G10B10Srgb = 0x88000000,
     A2R10G10B10Bt2020Pq = 0x88740000,
     A16R16G16B16Float = 0xC1060000,
+    // Two plane 4:2:0 video, what the social screen is fed with while a headset is in use.
+    YCbCr420Bt709 = 0x08322200,
 };
 
 enum class TilingMode : s32 {
@@ -42,6 +44,8 @@ constexpr std::string_view GetPixelFormatString(PixelFormat format) {
         return "A2R10G10B10Bt2020Pq";
     case PixelFormat::A16R16G16B16Float:
         return "A16R16G16B16Float";
+    case PixelFormat::YCbCr420Bt709:
+        return "YCbCr420Bt709";
     default:
         UNREACHABLE_MSG("Unknown pixel format {}", static_cast<u32>(format));
         return "";

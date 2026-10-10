@@ -1,3 +1,4 @@
+#include "core/vr/openxr_host.h"
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -105,6 +106,24 @@ Instance::Instance(Frontend::WindowSDL& window, s32 physical_device_index,
     ASSERT_MSG(num_physical_devices > 0, "No physical devices found");
     LOG_INFO(Render_Vulkan, "Found {} physical devices", num_physical_devices);
 
+#ifdef ENABLE_OPENXR_HOST
+    // A headset of the machine's own is driven from one graphics card, and takes pictures from
+    // nowhere else.
+    if (const vk::PhysicalDevice headset_device =
+            Core::Vr::OpenXrHost::Instance().PreferredPhysicalDevice(*instance)) {
+        const auto it = std::ranges::find(physical_devices, headset_device);
+        if (it != physical_devices.end()) {
+            const s32 index = static_cast<s32>(std::distance(physical_devices.begin(), it));
+            if (physical_device_index >= 0 && physical_device_index != index) {
+                LOG_WARNING(Render_Vulkan,
+                            "The headset is driven by graphics card {}, which is used instead "
+                            "of the configured {}",
+                            index, physical_device_index);
+            }
+            physical_device_index = index;
+        }
+    }
+#endif
     if (physical_device_index < 0) {
         std::vector<
             std::tuple<size_t, vk::PhysicalDeviceProperties2, vk::PhysicalDeviceMemoryProperties>>
@@ -205,7 +224,7 @@ bool Instance::CreateDevice() {
     const vk::StructureChain feature_chain = physical_device.getFeatures2<
         vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan11Features,
         vk::PhysicalDeviceVulkan12Features, vk::PhysicalDeviceVulkan13Features,
-        vk::PhysicalDeviceRobustness2FeaturesEXT,
+        vk::PhysicalDeviceRobustness2FeaturesEXT, vk::PhysicalDeviceFaultFeaturesEXT,
         vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT,
         vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT,
         vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT,
@@ -228,7 +247,8 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    boost::container::static_vector<const char*, 32> enabled_extensions;
+    const auto headset_extensions = Core::Vr::OpenXrHost::Instance().VulkanDeviceExtensions();
+    boost::container::static_vector<const char*, 96> enabled_extensions;
     const auto add_extension = [&](std::string_view extension) -> bool {
         const auto result =
             std::find_if(available_extensions.begin(), available_extensions.end(),
@@ -254,6 +274,10 @@ bool Instance::CreateDevice() {
                VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
     ASSERT_MSG(add_extension(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+
+    device_fault = feature_chain.get<vk::PhysicalDeviceFaultFeaturesEXT>().deviceFault &&
+                   add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+    LOG_INFO(Render_Vulkan, "GPU device fault reporting: {}", device_fault);
 
     const auto robustness2_features = feature_chain.get<vk::PhysicalDeviceRobustness2FeaturesEXT>();
     ASSERT_MSG(robustness2_features.robustBufferAccess2,
@@ -357,6 +381,14 @@ bool Instance::CreateDevice() {
     const bool calibrated_timestamps =
         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
 
+#ifdef ENABLE_OPENXR_HOST
+    for (const std::string& name : headset_extensions) {
+        if (std::ranges::none_of(enabled_extensions,
+                                 [&](const char* enabled) { return name == enabled; })) {
+            add_extension(name);
+        }
+    }
+#endif
     const auto family_properties = physical_device.getQueueFamilyProperties();
     if (family_properties.empty()) {
         LOG_CRITICAL(Render_Vulkan, "Physical device reported no queues.");
@@ -378,10 +410,13 @@ bool Instance::CreateDevice() {
     }
 
     static constexpr std::array queue_priorities = {1.0f};
+    headset_queue_index = Core::Vr::OpenXrHost::Instance().IsAvailable() &&
+        family_properties[queue_family_index].queueCount > 1 ? 1u : 0u;
+    static constexpr std::array headset_priorities{1.0f, 1.0f};
     const vk::DeviceQueueCreateInfo queue_info = {
         .queueFamilyIndex = queue_family_index,
-        .queueCount = static_cast<u32>(queue_priorities.size()),
-        .pQueuePriorities = queue_priorities.data(),
+        .queueCount = headset_queue_index + 1,
+        .pQueuePriorities = headset_priorities.data(),
     };
 
     const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
@@ -468,6 +503,10 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceDepthClipEnableFeaturesEXT{
             .depthClipEnable = true,
         },
+        vk::PhysicalDeviceFaultFeaturesEXT{
+            .deviceFault = device_fault,
+            .deviceFaultVendorBinary = false,
+        },
         vk::PhysicalDeviceRobustness2FeaturesEXT{
             .robustBufferAccess2 = true,
             .robustImageAccess2 = true,
@@ -532,6 +571,9 @@ bool Instance::CreateDevice() {
         },
     };
 
+    if (!device_fault) {
+        device_chain.unlink<vk::PhysicalDeviceFaultFeaturesEXT>();
+    }
     if (!custom_border_color) {
         device_chain.unlink<vk::PhysicalDeviceCustomBorderColorFeaturesEXT>();
     }
@@ -595,6 +637,7 @@ bool Instance::CreateDevice() {
     VULKAN_HPP_DEFAULT_DISPATCHER.init(*device);
 
     graphics_queue = device->getQueue(queue_family_index, 0);
+    headset_queue = device->getQueue(queue_family_index, headset_queue_index);
     present_queue = device->getQueue(queue_family_index, 0);
 
     if (calibrated_timestamps) {
@@ -775,6 +818,47 @@ void Instance::CollectToolingInfo() const {
     for (const vk::PhysicalDeviceToolProperties& tool : tools) {
         const std::string_view name = tool.name;
         LOG_INFO(Render_Vulkan, "Attached debugging tool: {}", name);
+    }
+}
+
+void Instance::ReportDeviceFault() const {
+    if (!device_fault) {
+        LOG_CRITICAL(Render_Vulkan, "GPU fault reporting is unavailable on this device");
+        return;
+    }
+    vk::DeviceFaultCountsEXT counts{};
+    auto result = device->getFaultInfoEXT(&counts, nullptr);
+    if (result != vk::Result::eSuccess) {
+        LOG_CRITICAL(Render_Vulkan, "GPU fault count query failed: {}", vk::to_string(result));
+        return;
+    }
+    // Bound allocations even when handling a failing driver. No vendor binary was enabled.
+    counts.addressInfoCount = std::min(counts.addressInfoCount, 256u);
+    counts.vendorInfoCount = std::min(counts.vendorInfoCount, 256u);
+    counts.vendorBinarySize = 0;
+    std::vector<vk::DeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+    std::vector<vk::DeviceFaultVendorInfoEXT> vendors(counts.vendorInfoCount);
+    vk::DeviceFaultInfoEXT info{
+        .pAddressInfos = addresses.data(),
+        .pVendorInfos = vendors.data(),
+    };
+    result = device->getFaultInfoEXT(&counts, &info);
+    if (result != vk::Result::eSuccess && result != vk::Result::eIncomplete) {
+        LOG_CRITICAL(Render_Vulkan, "GPU fault details query failed: {}", vk::to_string(result));
+        return;
+    }
+    LOG_CRITICAL(Render_Vulkan, "GPU fault: {} (query {})", info.description.data(),
+                 vk::to_string(result));
+    for (size_t i = 0; i < std::min<size_t>(counts.addressInfoCount, addresses.size()); ++i) {
+        const auto& address = addresses[i];
+        LOG_CRITICAL(Render_Vulkan, "GPU fault address: {} address={:#x} precision={:#x}",
+                     vk::to_string(address.addressType), address.reportedAddress,
+                     address.addressPrecision);
+    }
+    for (size_t i = 0; i < std::min<size_t>(counts.vendorInfoCount, vendors.size()); ++i) {
+        const auto& vendor = vendors[i];
+        LOG_CRITICAL(Render_Vulkan, "GPU vendor fault: {} code={:#x} data={:#x}",
+                     vendor.description.data(), vendor.vendorFaultCode, vendor.vendorFaultData);
     }
 }
 

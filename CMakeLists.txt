@@ -17,6 +17,7 @@ if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+option(ENABLE_OPENXR "Enable local PC VR headset" ON)
 project(shadPS4 CXX C ASM ${ADDITIONAL_LANGUAGES})
 
 include(FetchContent)
@@ -712,6 +713,8 @@ set(VR_LIBS  src/core/libraries/hmd/hmd.cpp
              src/core/libraries/vr_tracker/vr_tracker.h
 )
 
+file(GLOB PC_VR_SOURCES CONFIGURE_DEPENDS src/core/vr/*.cpp src/core/libraries/social_screen/*.cpp)
+list(APPEND VR_LIBS ${PC_VR_SOURCES} src/video_core/renderer_vulkan/vk_vr_exporter.cpp)
 set(MISC_LIBS  src/core/libraries/screenshot/screenshot.cpp
                src/core/libraries/screenshot/screenshot.h
                src/core/libraries/move/move.cpp
@@ -723,17 +726,7 @@ set(MISC_LIBS  src/core/libraries/screenshot/screenshot.cpp
                src/core/libraries/signin_dialog/signindialog.h
 )
 
-set(CAMERA_LIBS  src/core/libraries/camera/camera.cpp
-                 src/core/libraries/camera/camera.h
-                 src/core/libraries/camera/camera_helpers.h
-                 src/core/libraries/camera/camera_helpers.cpp
-                 src/core/libraries/camera/camera_audio.cpp
-                 src/core/libraries/camera/camera_calibration.cpp
-                 src/core/libraries/camera/camera_config.cpp
-                 src/core/libraries/camera/camera_config_types.h
-                 src/core/libraries/camera/camera_device.cpp
-                 src/core/libraries/camera/camera_error.h
-)
+set(CAMERA_LIBS src/core/libraries/camera/camera.cpp src/core/libraries/camera/camera.h)
 
 set(COMPANION_LIBS  src/core/libraries/companion/companion_httpd.cpp
                     src/core/libraries/companion/companion_httpd.h
@@ -1501,3 +1494,9 @@ else()
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+if(ENABLE_OPENXR)
+ target_compile_definitions(shadps4 PRIVATE ENABLE_OPENXR_HOST)
+ target_link_libraries(shadps4 PRIVATE OpenXR::openxr_loader ole32 uuid)
+endif()
+target_sources(shadps4 PRIVATE src/input/scripted_input.cpp)

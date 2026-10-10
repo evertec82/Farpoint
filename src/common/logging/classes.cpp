@@ -19,6 +19,8 @@ std::string_view NameOf(Class log_class) {
         return "KeyManager";
     case Class::Core:
         return "Core";
+    case Class::Core_Vr: return "Core.Vr";
+    case Class::Lib_SocialScreen: return "Lib.SocialScreen";
     case Class::Core_Linker:
         return "Core.Linker";
     case Class::Core_Devices:

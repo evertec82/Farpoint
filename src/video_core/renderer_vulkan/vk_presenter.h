@@ -2,17 +2,20 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
+#include "video_core/renderer_vulkan/vk_runtime.h"
+#include "core/vr/mirror_limiter.h"
 
 #include <condition_variable>
+#include <span>
 
 #include "core/libraries/videoout/buffer.h"
 #include "imgui/imgui_texture.h"
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
-#include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
+#include "video_core/renderer_vulkan/vk_vr_exporter.h"
 #include "video_core/texture_cache/texture_cache.h"
 
 namespace Frontend {
@@ -32,12 +35,28 @@ struct Frame {
     vk::Image image;
     vk::ImageView image_view;
     vk::Fence present_done;
+    /// The timeline the frame's commands were submitted on, and its tick once they have run.
+    Semaphore* ready_timeline{};
     vk::Semaphore ready_semaphore;
     u64 ready_tick;
     bool is_hdr{false};
     u8 id{};
+    /// The VR host buffer this frame lives in, or -1 for a frame that is shown on the window.
+    s8 host_buffer{-1};
 
     ImTextureID imgui_texture;
+};
+
+/// What a frame of the emulated headset is drawn into: the frame that goes on the window (or to
+/// the application that owns the headset, on a machine where that is another process), and,
+/// where the machine has a headset of its own, the frame that goes there.
+struct HmdFrames {
+    Frame* shown{};
+    Frame* exported{};
+
+    explicit operator bool() const {
+        return shown != nullptr || exported != nullptr;
+    }
 };
 
 enum SchedulerType {
@@ -96,20 +115,39 @@ public:
     Frame* PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
                         VAddr cpu_address);
 
+    /// Composes the two eye images of a headset frame side by side into a presentation frame
+    /// and stamps it with `frame_id` so the host can match it to a head pose.
+    HmdFrames PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textures,
+                              const Core::Vr::Fov& fov, u32 frame_id, u32& eye_width,
+                              u32& eye_height, bool packed_stereo,
+                              const std::optional<std::array<AmdGpu::Image, 2>>& overlay_textures,
+                              const std::array<std::array<float, 4>, 2>& overlay_uv);
+
+    /// Hands a frame made by PrepareHmdFrame to the VR host. Returns false for a frame that is
+    /// not one of the host's, which has to be presented as usual.
+    bool DeliverHmdFrame(Frame* frame, const Core::Vr::PresentedFrame& info);
+    /// Whether the GPU has finished drawing `frame`.
+    bool IsFrameFinished(const Frame* frame);
+    /// Whether the GPU still has drawing of the title's before it.
+    bool IsGpuBusy();
+
     Frame* PrepareBlankFrame(bool present_thread);
 
-    void Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true);
+    void Present(Frame* frame, bool is_reusing_frame = false);
     Frame* PrepareLastFrame();
 
 private:
     Frame* GetRenderFrame();
+
+    /// Writes a thumbnail of every image the guest GPU rendered into to <UserDir>/rt_dump.
 
     void RecreateFrame(Frame* frame, u32 width, u32 height);
 
     void SetExpectedGameSize(s32 width, s32 height);
 
 private:
-    float expected_ratio{1920.0 / 1080.0f};
+    Core::Vr::MirrorLimiter mirror_limiter;
+    std::optional<float> expected_ratio{1920.0 / 1080.0f};
     u32 expected_frame_width{1920};
     u32 expected_frame_height{1080};
 
@@ -119,6 +157,9 @@ private:
     HostPasses::FsrPass::Settings fsr_settings{};
     HostPasses::PostProcessingPass::Settings pp_settings{};
     HostPasses::PostProcessingPass pp_pass;
+    /// The same pass for the frames of the machine's own headset, which have a format of their
+    /// own. Only made where there is such a headset to draw for.
+    HostPasses::PostProcessingPass hmd_pp_pass;
     AmdGpu::Liverpool* liverpool;
     Scheduler draw_scheduler;
     Scheduler present_scheduler;
@@ -126,11 +167,12 @@ private:
     Swapchain swapchain;
     Runtime runtime;
     std::unique_ptr<Rasterizer> rasterizer;
+    std::unique_ptr<VrExporter> vr_exporter;
     VideoCore::TextureCache& texture_cache;
     vk::UniqueCommandPool command_pool;
     std::vector<Frame> present_frames;
     std::queue<Frame*> free_queue;
-    Frame* last_submit_frame;
+    Frame* last_submit_frame{};
     std::mutex free_mutex;
     std::condition_variable free_cv;
     std::condition_variable_any frame_cv;

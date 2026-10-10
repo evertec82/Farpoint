@@ -404,6 +404,27 @@ s32 PS4_SYSV_ABI sceKernelClockGetres(const u32 clock_id, OrbisKernelTimespec* r
 
 s32 PS4_SYSV_ABI posix_gettimeofday(OrbisKernelTimeval* tp, OrbisKernelTimezone* tz) {
 #ifdef _WIN64
+    // Reject impossible output ranges before either write. Do not reject protected
+    // guest pages here: their writes must still reach the GPU tracking handler.
+    // This is a range check, not a guarantee that the caller owns mapped memory.
+    static const auto user_range = [] {
+        SYSTEM_INFO info{};
+        GetSystemInfo(&info);
+        return info;
+    }();
+    const auto valid_output = [](const void* pointer, size_t size) {
+        if (!pointer) {
+            return true;
+        }
+        const auto address = reinterpret_cast<uintptr_t>(pointer);
+        const auto minimum = reinterpret_cast<uintptr_t>(user_range.lpMinimumApplicationAddress);
+        const auto maximum = reinterpret_cast<uintptr_t>(user_range.lpMaximumApplicationAddress);
+        return address >= minimum && address <= maximum && size - 1 <= maximum - address;
+    };
+    if (!valid_output(tp, sizeof(*tp)) || !valid_output(tz, sizeof(*tz))) {
+        SetPosixErrno(EFAULT);
+        return -1;
+    }
     if (tp) {
         FILETIME filetime;
         GetSystemTimePreciseAsFileTime(&filetime);

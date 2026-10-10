@@ -20,6 +20,7 @@
 #include "common/logging/log.h"
 #include "common/path_util.h"
 #include "core/emulator_settings.h"
+#include "core/vr/openxr_host.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 
@@ -204,6 +205,18 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
 
+#ifdef ENABLE_OPENXR_HOST
+    // What the runtime of the machine's own headset wants of an instance it is handed
+    // pictures by. (The names have to outlive the making of the instance.)
+    static std::vector<std::string> headset_extensions;
+    headset_extensions = Core::Vr::OpenXrHost::Instance().VulkanInstanceExtensions();
+    for (const std::string& name : headset_extensions) {
+        if (std::ranges::none_of(extensions,
+                                 [&](const char* present) { return name == present; })) {
+            extensions.push_back(name.c_str());
+        }
+    }
+#endif
     // Sanitize extension list
     std::erase_if(extensions, [&](const char* extension) -> bool {
         const auto it =

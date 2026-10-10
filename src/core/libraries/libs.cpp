@@ -29,6 +29,7 @@
 #include "core/libraries/keyboard/keyboard.h"
 #include "core/libraries/libc_internal/libc_internal.h"
 #include "core/libraries/libs.h"
+#include "core/libraries/social_screen/social_screen.h"
 #include "core/libraries/mouse/mouse.h"
 #include "core/libraries/move/move.h"
 #include "core/libraries/net/net.h"
@@ -173,6 +174,7 @@ void InitHLELibs(Core::Loader::SymbolsResolver* sym) {
             {"libSceKeyboard.sprx", Libraries::Keyboard::RegisterLib},
             {"libSceWebBrowserDialog.sprx", Libraries::WebBrowserDialog::RegisterLib},
             {"libSceZlib.sprx", Libraries::Zlib::RegisterLib},
+            {"libSceSocialScreen.sprx", Libraries::SocialScreen::RegisterLib},
             {"libSceHmd.sprx", Libraries::Hmd::RegisterLib},
             {"libSceHmdSetupDialog.sprx", Libraries::HmdSetupDialog::RegisterLib},
             {"libSceDiscMap.sprx", Libraries::DiscMap::RegisterLib},

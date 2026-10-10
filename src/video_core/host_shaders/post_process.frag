@@ -6,11 +6,20 @@
 layout (location = 0) in vec2 uv;
 layout (location = 0) out vec4 color;
 
-layout (binding = 0) uniform sampler2D texSampler;
+layout (binding = 0) uniform sampler2D texSampler[2];
 
 layout (push_constant) uniform settings {
     float gamma;
     bool hdr;
+    // Above 0, the picture is sharpened by so much (up to 1): for one that is shown larger
+    // than it was drawn, which blurs it.
+    float sharpen;
+    // The target encodes what it is given for display by itself (an sRGB image): it has to be
+    // given linear light, or the picture would be encoded twice.
+    bool linear_out;
+    vec4 source_uv;
+    vec4 overlay_uv;
+    bool has_overlay;
     bool srgb_input;
 } pp;
 
@@ -23,22 +32,56 @@ vec3 gamma(vec3 rgb) {
     );
 }
 
-// Exact inverse of gamma() at unit gamma, for buffers that are sRGB encoded but must be sampled
-// through a UNORM view because Vulkan has no sRGB variant of the 10-bit format.
-vec3 degamma(vec3 rgb) {
-    return mix(
-        pow(max(rgb + b, 0.0) / a, vec3(2.4)),
-        rgb / d,
-        lessThan(rgb, vec3(d * cutoff))
-    );
+// Compose in the source color space before gamma conversion, including sharpening taps.
+vec4 composed(vec2 at) {
+    vec2 half_texel = 0.5 / vec2(textureSize(texSampler[0], 0));
+    at = clamp(at, pp.source_uv.zw + half_texel,
+               pp.source_uv.zw + pp.source_uv.xy - half_texel);
+    vec4 result = textureLod(texSampler[0], at, 0.0);
+    if (pp.srgb_input && !pp.hdr) {
+        result.rgb = mix(pow(max(result.rgb + b, 0.0) / a, vec3(2.4)), result.rgb / d,
+                         lessThan(result.rgb, vec3(d * cutoff)));
+    }
+    if (pp.has_overlay) {
+        vec2 overlay_at = at * pp.overlay_uv.xy + pp.overlay_uv.zw;
+        if (all(greaterThanEqual(overlay_at, vec2(0.0))) &&
+            all(lessThanEqual(overlay_at, vec2(1.0)))) {
+            vec4 over = textureLod(texSampler[1], overlay_at, 0.0);
+            result.rgb = over.rgb + result.rgb * (1.0 - clamp(over.a, 0.0, 1.0));
+        }
+    }
+    return result;
+}
+
+vec3 shown(vec2 at) {
+    vec3 rgb = composed(at).rgb;
+    return pp.hdr ? rgb : gamma(rgb);
 }
 
 void main() {
-    vec4 color_linear = texture(texSampler, uv);
-    if (pp.hdr) {
-        color = color_linear;
-    } else {
-        if (pp.srgb_input) color_linear.rgb = degamma(color_linear.rgb);
-        color = vec4(gamma(color_linear.rgb), color_linear.a);
+    vec2 source = uv * pp.source_uv.xy + pp.source_uv.zw;
+    vec4 color_linear = composed(source);
+    vec3 here = pp.hdr ? color_linear.rgb : gamma(color_linear.rgb);
+    if (pp.sharpen > 0.0) {
+        // Contrast adaptive sharpening: a pixel is pushed away from the four next to it, the
+        // more the less they differ already, and never beyond black or white.
+        vec2 texel = 1.0 / vec2(textureSize(texSampler[0], 0));
+        vec3 above = shown(source - vec2(0.0, texel.y));
+        vec3 below = shown(source + vec2(0.0, texel.y));
+        vec3 left = shown(source - vec2(texel.x, 0.0));
+        vec3 right = shown(source + vec2(texel.x, 0.0));
+        vec3 darkest = min(min(min(above, below), min(left, right)), here);
+        vec3 brightest = max(max(max(above, below), max(left, right)), here);
+        vec3 room = sqrt(clamp(min(darkest, 1.0 - brightest) / max(brightest, vec3(1e-5)),
+                               0.0, 1.0));
+        vec3 weight = room * (-1.0 / mix(8.0, 5.0, clamp(pp.sharpen, 0.0, 1.0)));
+        here = clamp(((above + below + left + right) * weight + here) / (1.0 + 4.0 * weight),
+                     0.0, 1.0);
     }
+    if (pp.linear_out && !pp.hdr) {
+        // Back to linear light, by the curve the target encodes with.
+        here = mix(pow((here + 0.055) / 1.055, vec3(2.4)), here / 12.92,
+                   lessThanEqual(here, vec3(0.04045)));
+    }
+    color = vec4(here, color_linear.a);
 }
