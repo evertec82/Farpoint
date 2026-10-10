@@ -147,6 +147,11 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     const bool report_unhandled =
         use_static_windows_guest_red_zone_protection ? static_protection_exception : true;
     if (report_unhandled) {
+#if defined(ARCH_X86_64)
+        if (pExp && pExp->ContextRecord) {
+            SaveFaultContext(*pExp->ContextRecord);
+        }
+#endif
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
 #if defined(ARCH_X86_64)
         if (pExp && pExp->ContextRecord) {

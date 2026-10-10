@@ -129,6 +129,12 @@ $env:SHADPS4_OPENXR = '1'; $env:SHADPS4_VR = '1'
 $env:SHADPS4_XR_WAIT = '0'; $env:SHADPS4_XR_PAUSE = '0'
 $env:SHADPS4_XR_GAMEPAD_LAYOUT = '1'
 $env:SHADPS4_XR_PAD_HAND = 'right'
+$env:SHADPS4_XR_TOGGLE_L3 = '1'
+$env:SHADPS4_GPU_WAIT_TIMING = '1'
+$env:SHADPS4_ALLOCATION_TRACE = '1'
+$env:SHADPS4_TEXTURE_SOURCE_CAPTURE = $null
+$env:SHADPS4_XR_PAD_PITCH = '-20'
+$env:SHADPS4_XR_PAD_OFFSET = '0,0,-0.1778'
 $env:SHADPS4_VR_WINDOW_FPS = [string]$MirrorFps
 $env:SHADPS4_FARPOINT_OFFLINE_SCORE = '1'
 $env:SHADPS4_FARPOINT_EYE_WIDTH = ''
@@ -145,8 +151,14 @@ if (Test-Path -LiteralPath $priorLog) {
     Copy-Item -LiteralPath $priorLog -Destination (Join-Path $logRoot "previous-$stamp.txt")
 }
 @{ Started=(Get-Date).ToString('o'); Executable=$exe; SHA256=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash; GameSHA256=$expectedHash; EyeWidth=$EyeWidth; MirrorFps=$MirrorFps; Controller=$Controller } | ConvertTo-Json | Set-Content (Join-Path $logRoot "session-$stamp.json") -Encoding UTF8
-$process = Start-Process -FilePath $exe -WorkingDirectory $PSScriptRoot -ArgumentList @('-g',('"' + $GamePath + '"')) -PassThru
+$stdoutPath = Join-Path $logRoot "console-$stamp.stdout.txt"
+$stderrPath = Join-Path $logRoot "console-$stamp.stderr.txt"
+$process = Start-Process -FilePath $exe -WorkingDirectory $PSScriptRoot -ArgumentList @('-g',('"' + $GamePath + '"')) -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+$processHandle = $process.Handle
 Write-Host "Farpoint started. Log: $PSScriptRoot\user\log\shad_log.txt"
 $process.WaitForExit()
-if ($process.ExitCode -ne 0) { throw "Farpoint ended with code $($process.ExitCode). See user\log\shad_log.txt." }
+$exitCode = $process.ExitCode
+$exitHex = if ($null -ne $exitCode) { '0x{0:X8}' -f [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$exitCode), 0) } else { 'unavailable' }
+@{ Ended=(Get-Date).ToString('o'); ProcessId=$process.Id; ExitCode=$exitCode; ExitCodeHex=$exitHex; StandardOutput=$stdoutPath; StandardError=$stderrPath } | ConvertTo-Json | Set-Content (Join-Path $logRoot "exit-$stamp.json") -Encoding UTF8
+if ($exitCode -ne 0) { throw "Farpoint ended with code $exitCode ($exitHex). See user\log and collect-crash-report.ps1." }
 

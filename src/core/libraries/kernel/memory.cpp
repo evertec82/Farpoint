@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <bit>
+#include "core/allocation_diagnostics.h"
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -76,6 +77,9 @@ s32 PS4_SYSV_ABI sceKernelAllocateDirectMemory(s64 searchStart, s64 searchEnd, u
 
     auto* memory = Core::Memory::Instance();
     PAddr phys_addr = memory->Allocate(searchStart, searchEnd, len, alignment, memoryType);
+    Core::TraceAllocation("allocate", 0, len, phys_addr,
+                          phys_addr == -1 ? ORBIS_KERNEL_ERROR_EAGAIN : ORBIS_OK,
+                          __builtin_return_address(0));
     if (phys_addr == -1) {
         return ORBIS_KERNEL_ERROR_EAGAIN;
     }
@@ -107,7 +111,10 @@ s32 PS4_SYSV_ABI sceKernelCheckedReleaseDirectMemory(u64 start, u64 len) {
         return ORBIS_OK;
     }
     auto* memory = Core::Memory::Instance();
-    return memory->Free(start, len, true);
+    Core::TraceAllocation("release-checked-begin", 0, len, start, 0, __builtin_return_address(0));
+    const auto result = memory->Free(start, len, true);
+    Core::TraceAllocation("release-checked-end", 0, len, start, result, __builtin_return_address(0));
+    return result;
 }
 
 s32 PS4_SYSV_ABI sceKernelReleaseDirectMemory(u64 start, u64 len) {
@@ -121,7 +128,9 @@ s32 PS4_SYSV_ABI sceKernelReleaseDirectMemory(u64 start, u64 len) {
         return ORBIS_OK;
     }
     auto* memory = Core::Memory::Instance();
-    memory->Free(start, len, false);
+    Core::TraceAllocation("release-begin", 0, len, start, 0, __builtin_return_address(0));
+    const auto result = memory->Free(start, len, false);
+    Core::TraceAllocation("release-end", 0, len, start, result, __builtin_return_address(0));
     return ORBIS_OK;
 }
 
@@ -253,6 +262,8 @@ s32 PS4_SYSV_ABI sceKernelMapNamedDirectMemory(void** addr, u64 len, s32 prot, s
                           should_check, phys_addr, alignment);
 
     LOG_INFO(Kernel_Vmm, "out_addr = {}", fmt::ptr(*addr));
+    Core::TraceAllocation("map", reinterpret_cast<u64>(*addr), len, phys_addr, ret,
+                          __builtin_return_address(0));
     return ret;
 }
 
@@ -845,7 +856,12 @@ s32 PS4_SYSV_ABI sceKernelMunmap(void* addr, u64 len) {
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
     auto* memory = Core::Memory::Instance();
-    return memory->UnmapMemory(std::bit_cast<VAddr>(addr), len);
+    Core::TraceAllocation("unmap-begin", reinterpret_cast<u64>(addr), len, 0, 0,
+                          __builtin_return_address(0));
+    const auto result = memory->UnmapMemory(std::bit_cast<VAddr>(addr), len);
+    Core::TraceAllocation("unmap-end", reinterpret_cast<u64>(addr), len, 0, result,
+                          __builtin_return_address(0));
+    return result;
 }
 
 s32 PS4_SYSV_ABI posix_munmap(void* addr, u64 len) {

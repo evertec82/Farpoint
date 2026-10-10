@@ -1,6 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <map>
+#include <string_view>
+#include <chrono>
+#include <cstdlib>
+#include "common/logging/log.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/thread.h"
@@ -114,21 +120,65 @@ void Scheduler::Flush() {
     Flush(info);
 }
 
-void Scheduler::Finish() {
+void Scheduler::Finish(std::source_location caller) {
     // When finishing, we need to wait for the submission to have executed on the device.
     const u64 presubmit_tick = CurrentTick();
     SubmitInfo info{};
     SubmitExecution(info);
-    Wait(presubmit_tick);
+    Wait(presubmit_tick, caller);
 }
 
-void Scheduler::Wait(u64 tick) {
+void Scheduler::Wait(u64 tick, std::source_location caller) {
+    static const bool timing = [] {
+        const char* value = std::getenv("SHADPS4_GPU_WAIT_TIMING");
+        return value != nullptr && value[0] == '1';
+    }();
+    using Clock = std::chrono::steady_clock;
+    const auto start = timing ? Clock::now() : Clock::time_point{};
     if (tick >= work_semaphore.CurrentTick()) {
-        // Make sure we are not waiting for the current tick without signalling
         SubmitInfo info{};
         Flush(info);
     }
     work_semaphore.Wait(tick);
+    if (timing) {
+        const auto end = Clock::now();
+        thread_local auto report_start = start;
+        thread_local double total_ms = 0.0;
+        thread_local double max_ms = 0.0;
+        thread_local u64 calls = 0;
+        struct SiteTiming {
+            u64 calls{};
+            double total_ms{};
+            double max_ms{};
+        };
+        thread_local std::map<std::pair<std::string_view, u32>, SiteTiming> sites;
+        const double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
+        total_ms += elapsed_ms;
+        max_ms = std::max(max_ms, elapsed_ms);
+        ++calls;
+        auto& site = sites[{caller.function_name(), caller.line()}];
+        ++site.calls;
+        site.total_ms += elapsed_ms;
+        site.max_ms = std::max(site.max_ms, elapsed_ms);
+        const double seconds = std::chrono::duration<double>(end - report_start).count();
+        if (seconds >= 10.0) {
+            LOG_INFO(Render_Vulkan,
+                     "GPU scheduler waits: {} calls in {:.2f}s, {:.2f}ms total, {:.2f}ms max, {:.1f}% of this thread's interval",
+                     calls, seconds, total_ms, max_ms, total_ms / (seconds * 10.0));
+            for (auto& [location, value] : sites) {
+                if (value.calls != 0) {
+                    LOG_INFO(Render_Vulkan,
+                             "GPU wait caller {} line {}: {} calls, {:.2f}ms total, {:.2f}ms max",
+                             location.first, location.second, value.calls, value.total_ms,
+                             value.max_ms);
+                    value = {};
+                }
+            }
+            report_start = end;
+            total_ms = max_ms = 0.0;
+            calls = 0;
+        }
+    }
 }
 
 void Scheduler::PopPendingOperations() {

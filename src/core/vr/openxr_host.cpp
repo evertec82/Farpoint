@@ -424,6 +424,7 @@ struct OpenXrHost::Impl {
     u32 controllers_in_use{};
     int pad_hand{1};
     XrVector3f pad_offset{};
+    Quat pad_rotation{0.0f, 0.0f, 0.0f, 1.0f};
     XrActionSet action_set{XR_NULL_HANDLE};
     XrAction act_move{XR_NULL_HANDLE};
     XrAction act_finger{XR_NULL_HANDLE};
@@ -458,6 +459,8 @@ struct OpenXrHost::Impl {
     bool controllers_used{};
     bool controller_tracked{};
     bool view_reset_held{};
+    bool left_click_held{};
+    bool left_click_latched{};
     Libraries::Pad::OrbisPadButtonDataOffset sent_buttons{};
     std::array<int, 6> sent_axes{128, 128, 128, 128, 0, 0};
     bool sent_touch{};
@@ -1033,6 +1036,8 @@ struct OpenXrHost::Impl {
     }
 
     void ReleaseControllers(const char* why, bool release_moves = true) {
+        left_click_held = false;
+        left_click_latched = false;
         if (release_moves) {
             Runtime::Instance().ReleaseMoves();
         }
@@ -1308,7 +1313,20 @@ struct OpenXrHost::Impl {
             Runtime::Instance().RequestRecenter();
         }
         view_reset_held = view_reset;
-        add(left_stick_in && !view_reset, Buttons::L3);
+        static const bool toggle_left_click = [] {
+            const char* value = std::getenv("SHADPS4_XR_TOGGLE_L3");
+            return value && value[0] == '1';
+        }();
+        if (toggle_left_click) {
+            if (view_reset) {
+                left_click_latched = false;
+            } else if (left_stick_in && !left_click_held) {
+                left_click_latched = !left_click_latched;
+                LOG_INFO(Core_Vr, "Left stick toggle: {}", left_click_latched);
+            }
+            left_click_held = left_stick_in;
+        }
+        add(!view_reset && (toggle_left_click ? left_click_latched : left_stick_in), Buttons::L3);
         add(right_stick_in && !view_reset, gamepad_layout ? Buttons::R3 : Buttons::TouchPad);
 
         const auto axis = [](float value) {
@@ -1403,9 +1421,9 @@ struct OpenXrHost::Impl {
             DeviceState state;
             state.pose.position = {location.pose.position.x, location.pose.position.y,
                                    location.pose.position.z};
-            state.pose.orientation =
-                Normalize({location.pose.orientation.x, location.pose.orientation.y,
-                           location.pose.orientation.z, location.pose.orientation.w});
+            state.pose.orientation = Normalize(Multiply(
+                {location.pose.orientation.x, location.pose.orientation.y,
+                 location.pose.orientation.z, location.pose.orientation.w}, pad_rotation));
             if ((velocity.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) != 0) {
                 state.linear_velocity = {velocity.linearVelocity.x, velocity.linearVelocity.y,
                                          velocity.linearVelocity.z};
@@ -2789,6 +2807,10 @@ bool OpenXrHost::Connect() {
         if (std::sscanf(offset, "%f,%f,%f", &value.x, &value.y, &value.z) == 3) {
             impl->pad_offset = value;
         }
+    }
+    const float pad_pitch = EnvFloat("SHADPS4_XR_PAD_PITCH", 0.0f);
+    if (std::isfinite(pad_pitch)) {
+        impl->pad_rotation = FromYawPitch(0.0f, pad_pitch * 0.017453292519943295f);
     }
     impl->predict_ms = EnvFloat("SHADPS4_XR_PREDICT_MS", 20.0f);
     impl->lose_after = EnvFloat("SHADPS4_XR_LOSE_AFTER", 0.0f);

@@ -137,7 +137,7 @@ public:
     Frame* PrepareLastFrame();
 
 private:
-    Frame* GetRenderFrame();
+    Frame* GetRenderFrame(bool nonblock = false);
 
     /// Writes a thumbnail of every image the guest GPU rendered into to <UserDir>/rt_dump.
 

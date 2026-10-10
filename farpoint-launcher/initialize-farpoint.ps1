@@ -28,6 +28,13 @@ if ($missing) {
     [FarpointProfiles]::Generate((Join-Path (Split-Path $GamePath -Parent) 'refuge/content/paks/pakchunk0-ps4.pak'), $profiles)
     Write-Host 'Created resolution profiles from your game.'
 }
+$enhancementMarker=Join-Path $profiles 'enhancements-v0.7.0.ready'
+$pakDirectory=Join-Path (Split-Path $GamePath -Parent) 'refuge/content/paks'
+if (-not (Test-Path $enhancementMarker) -or -not (Test-Path (Join-Path $pakDirectory 'pakchunk100-PCVR-Sprint_P.pak')) -or -not (Test-Path (Join-Path $pakDirectory 'pakchunk101-PCVR-MemoryBudget_P.pak'))) {
+    if (-not ('FarpointProfiles' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'FarpointProfiles.cs') }
+    [FarpointProfiles]::GenerateEnhancements((Join-Path $pakDirectory 'pakchunk0-ps4.pak'), $pakDirectory)
+    Set-Content -LiteralPath $enhancementMarker -Value 'v0.7.0'
+}
 $userDir=Join-Path $PSScriptRoot 'user'
 New-Item -ItemType Directory $userDir -Force | Out-Null
 if (-not (Test-Path (Join-Path $userDir 'config.json'))) { Copy-Item (Join-Path $PSScriptRoot 'config-default.json') (Join-Path $userDir 'config.json') }

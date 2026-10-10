@@ -2,6 +2,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <limits>
+#include <cstdlib>
+#include <set>
+#include <tuple>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <xxhash.h>
 
 #include "common/assert.h"
@@ -25,6 +34,69 @@ namespace VideoCore {
 static constexpr u32 MAX_IMAGES = std::numeric_limits<u16>::max();
 static constexpr u32 MAX_IMAGE_VIEWS = std::numeric_limits<u16>::max();
 static constexpr u32 MAX_SAMPLERS = std::numeric_limits<u16>::max();
+
+static void CaptureSampledTexture(const Image& image) {
+#ifdef _WIN32
+    static const bool enabled = std::getenv("SHADPS4_TEXTURE_SOURCE_CAPTURE") != nullptr;
+    if (!enabled || !image.info.props.is_block) {
+        return;
+    }
+    static std::chrono::steady_clock::time_point next_poll{}, deadline{};
+    static std::filesystem::path directory;
+    static std::set<std::tuple<VAddr, u32, u32>> seen;
+    static u64 total_bytes = 0;
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= next_poll) {
+        next_poll = now + std::chrono::seconds(1);
+        std::error_code ec;
+        if (std::filesystem::remove("user/capture-texture-sources", ec)) {
+            directory = std::filesystem::path("user/captures") /
+                        fmt::format("texture-sources-{}", GetTickCount64());
+            std::filesystem::create_directories(directory, ec);
+            if (ec) {
+                return;
+            }
+            seen.clear();
+            total_bytes = 0;
+            deadline = now + std::chrono::seconds(2);
+            LOG_INFO(Render_Vulkan, "Texture source capture: {}", directory.string());
+        }
+    }
+    const auto& info = image.info;
+    if (now >= deadline || seen.size() >= 128 || info.guest_size == 0 ||
+        info.guest_size > 16_MB) {
+        return;
+    }
+    const auto key = std::make_tuple(info.guest_address, info.guest_size,
+                                   static_cast<u32>(info.pixel_format));
+    if (total_bytes + info.guest_size > 256_MB || !seen.insert(key).second) {
+        return;
+    }
+    std::vector<u8> bytes(info.guest_size);
+    SIZE_T copied = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(info.guest_address),
+                           bytes.data(), bytes.size(), &copied) || copied != bytes.size()) {
+        LOG_WARNING(Render_Vulkan, "Texture source unreadable: {:#x}", info.guest_address);
+        return;
+    }
+    total_bytes += bytes.size();
+    const auto stem = fmt::format("{:x}_{}", info.guest_address,
+                                  static_cast<u32>(info.pixel_format));
+    std::ofstream data(directory / (stem + ".bin"), std::ios::binary);
+    data.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    std::ofstream meta(directory / (stem + ".txt"));
+    meta << fmt::format("format={} width={} height={} depth={} pitch={} bits={} levels={} layers={} tile={} bank={} alt={} gpu_modified={}\n",
+                        vk::to_string(info.pixel_format), info.size.width, info.size.height,
+                        info.size.depth, info.pitch, info.num_bits, info.resources.levels,
+                        info.resources.layers, static_cast<u32>(info.tile_mode), info.bank_swizzle,
+                        info.alt_tile, True(image.flags & ImageFlagBits::GpuModified));
+    for (u32 m = 0; m < info.resources.levels; ++m) {
+        const auto& mip = info.mips_layout[m];
+        meta << fmt::format("mip={} offset={} size={} pitch={} height={}\n", m, mip.offset,
+                            mip.size, mip.pitch, mip.height);
+    }
+#endif
+}
 
 TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                            Vulkan::Runtime& runtime_, AmdGpu::Liverpool* liverpool_,
@@ -83,15 +155,20 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     if (False(image.flags & ImageFlagBits::GpuModified)) {
         return;
     }
-    const u32 download_size = image.info.pitch * image.info.size.height * image.info.size.depth *
-                              image.info.resources.layers * (image.info.num_bits / 8);
+    const bool single_pixel = !image.info.props.is_block && image.info.size.width == 1 &&
+                              image.info.size.height == 1 && image.info.size.depth == 1 &&
+                              image.info.resources.layers == 1;
+    const u32 download_size = single_pixel
+                                  ? image.info.num_bits / 8
+                                  : image.info.pitch * image.info.size.height * image.info.size.depth *
+                                        image.info.resources.layers * (image.info.num_bits / 8);
     ASSERT(download_size <= image.info.guest_size);
     const auto download =
         runtime.GetStagingPool().Request(download_size, MemoryType::HostCached, 16, !sync);
     const vk::BufferImageCopy image_download = {
         .bufferOffset = download.offset,
-        .bufferRowLength = image.info.pitch,
-        .bufferImageHeight = image.info.size.height,
+        .bufferRowLength = single_pixel ? 0u : image.info.pitch,
+        .bufferImageHeight = single_pixel ? 0u : image.info.size.height,
         .imageSubresource =
             {
                 .aspectMask = image.info.props.is_depth ? vk::ImageAspectFlagBits::eDepth
@@ -636,6 +713,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
         }
     }
     UpdateImage(image_id);
+    CaptureSampledTexture(image);
     return image.FindView(desc.view_info);
 }
 

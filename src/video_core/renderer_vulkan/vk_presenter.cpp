@@ -893,7 +893,7 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
             return result;
         }();
         if (mirror_limiter.Due(std::chrono::steady_clock::now(), local != nullptr, window_fps)) {
-            frame = GetRenderFrame();
+            frame = GetRenderFrame(local != nullptr);
         }
         if (!frame && !local) {
             return {};
@@ -1250,8 +1250,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
         }
     }
     // Log first 64, then every 16th, always around suspected 32-present boundary.
-    const bool trace = trace_id < 64 || (trace_id % 16u) == 0u ||
-                       (trace_id >= 28 && trace_id <= 40);
+    static const bool trace_enabled = [] {
+        const char* value = std::getenv("SHADPS4_PRESENT_TRACE");
+        return value != nullptr && value[0] == '1';
+    }();
+    const bool trace = trace_enabled && (trace_id < 64 || (trace_id % 16u) == 0u);
     // Free the frame for reuse. One that was shown again was taken out of the pool for that.
     const auto free_frame = [&] {
         std::scoped_lock fl{free_mutex};
@@ -1549,11 +1552,10 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
     }
 }
 
-Frame* Presenter::GetRenderFrame() {
+Frame* Presenter::GetRenderFrame(bool nonblock) {
     // Wait for free presentation frames
     Frame* frame;
-    const bool nonblock =
-        false;
+    size_t free_remaining{};
     {
         std::unique_lock lock{free_mutex};
         if (nonblock) {
@@ -1568,6 +1570,7 @@ Frame* Presenter::GetRenderFrame() {
         // Take the frame from the queue
         frame = free_queue.front();
         free_queue.pop();
+        free_remaining = free_queue.size();
     }
 
     const vk::Device device = instance.GetDevice();
@@ -1575,15 +1578,19 @@ Frame* Presenter::GetRenderFrame() {
 
     static std::atomic_uint32_t get_frame_traces{};
     const u32 get_id = get_frame_traces.fetch_add(1, std::memory_order_relaxed);
-    if (get_id < 64 || (get_id % 16u) == 0u || (get_id >= 28 && get_id <= 40)) {
+    static const bool trace_enabled = [] {
+        const char* value = std::getenv("SHADPS4_PRESENT_TRACE");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (trace_enabled && (get_id < 64 || (get_id % 16u) == 0u)) {
         LOG_INFO(Render_Vulkan,
                  "GET_RENDER_FRAME_WAIT frameGetId={} slot={} poolSize={} freeRemaining={} "
                  "readyTick={} (before waitForFences)",
-                 get_id, frame ? int(frame->id) : -1, present_frames.size(), free_queue.size(),
+                 get_id, frame ? int(frame->id) : -1, present_frames.size(), free_remaining,
                  frame ? frame->ready_tick : 0);
     }
 
-    const u64 timeout_ns = std::numeric_limits<u64>::max();
+    const u64 timeout_ns = nonblock ? 0 : std::numeric_limits<u64>::max();
 
     const auto wait = [&]() {
         result = device.waitForFences(frame->present_done, false, timeout_ns);
