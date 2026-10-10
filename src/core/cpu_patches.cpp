@@ -1288,13 +1288,6 @@ DecodedCodeInstruction DecodeCodeInstruction(uintptr_t address, uintptr_t end) {
 
     for (u8 index = 0; index < decoded.instruction.operand_count_visible; ++index) {
         const auto& operand = decoded.operands[index];
-        if (operand.type == ZYDIS_OPERAND_TYPE_MEMORY &&
-            operand.mem.base == ZYDIS_REGISTER_RBP && operand.mem.disp.size != 0 &&
-            operand.mem.disp.value < 0) {
-            // RBP-relative locals can be below RSP; no frame-to-stack offset is modeled here.
-            decoded.has_red_zone_operand = true;
-            decoded.has_unmodeled_red_zone_operand = true;
-        }
         if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY ||
             !IsStackPointerRegister(operand.mem.base) || operand.mem.disp.size == 0 ||
             operand.mem.disp.value >= 0) {
@@ -1627,7 +1620,100 @@ RedZoneMask TranslateRedZoneMask(const RedZoneMask& mask, s64 stack_pointer_delt
     return translated;
 }
 
+void AnalyzeFrameRelativeRedZone(DecodedFunction& function) {
+    if (function.instructions.empty()) {
+        return;
+    }
+    std::map<uintptr_t, std::optional<s64>> frame_offsets;
+    std::vector<uintptr_t> pending{function.instructions.begin()->first};
+    frame_offsets.emplace(pending.front(), std::nullopt);
+    while (!pending.empty()) {
+        const auto address = pending.back();
+        pending.pop_back();
+        const auto& decoded = function.instructions.at(address);
+        auto offset = frame_offsets.at(address);
+        const auto& operands = decoded.operands;
+        const bool sets_frame = decoded.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
+            operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+            operands[0].reg.value == ZYDIS_REGISTER_RBP &&
+            operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+            operands[1].reg.value == ZYDIS_REGISTER_RSP;
+        if (sets_frame) {
+            offset = 0;
+        } else {
+            for (u8 i = 0; i < decoded.instruction.operand_count; ++i) {
+                if (operands[i].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                    operands[i].reg.value == ZYDIS_REGISTER_RBP &&
+                    (operands[i].actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) != 0) {
+                    offset.reset();
+                }
+            }
+            if (decoded.changes_stack_pointer) {
+                if (offset && decoded.stack_pointer_delta) {
+                    *offset -= *decoded.stack_pointer_delta;
+                } else {
+                    offset.reset();
+                }
+            }
+        }
+        const auto visit = [&](uintptr_t next) {
+            if (!function.instructions.contains(next)) {
+                return;
+            }
+            auto [it, inserted] = frame_offsets.emplace(next, offset);
+            if (inserted) {
+                pending.push_back(next);
+            } else if (it->second && it->second != offset) {
+                it->second.reset();
+                pending.push_back(next);
+            }
+        };
+        const auto category = decoded.instruction.meta.category;
+        if (category == ZYDIS_CATEGORY_COND_BR || category == ZYDIS_CATEGORY_UNCOND_BR) {
+            visit(GetRelativeTarget(decoded));
+        }
+        if (!IsControlFlowTerminator(decoded.instruction)) {
+            visit(address + decoded.instruction.length);
+        }
+    }
+    for (auto& [address, decoded] : function.instructions) {
+        const auto state = frame_offsets.find(address);
+        if (state == frame_offsets.end() || !state->second) {
+            continue;
+        }
+        for (u8 i = 0; i < decoded.instruction.operand_count_visible; ++i) {
+            const auto& operand = decoded.operands[i];
+            if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY ||
+                operand.mem.base != ZYDIS_REGISTER_RBP ||
+                operand.mem.index != ZYDIS_REGISTER_NONE) {
+                continue;
+            }
+            const s64 begin = operand.mem.disp.value + *state->second;
+            const s64 end = begin + std::max<s64>(operand.size / 8, 1);
+            if (begin >= 0 || end <= -static_cast<s64>(GuestRedZoneSize)) {
+                continue;
+            }
+            function.uses_red_zone = true;
+            if (decoded.instruction.mnemonic == ZYDIS_MNEMONIC_LEA) {
+                function.requires_conservative_red_zone_tracking = true;
+                continue;
+            }
+            for (s64 n = std::max(begin, -static_cast<s64>(GuestRedZoneSize));
+                 n < std::min<s64>(end, 0); ++n) {
+                const size_t bit = n + static_cast<s64>(GuestRedZoneSize);
+                if ((operand.actions & ZYDIS_OPERAND_ACTION_MASK_READ) != 0) {
+                    decoded.red_zone_use.set(bit);
+                }
+                if ((operand.actions & ZYDIS_OPERAND_ACTION_WRITE) != 0) {
+                    decoded.red_zone_def.set(bit);
+                }
+            }
+        }
+    }
+}
+
 void AnalyzeRedZoneLiveness(DecodedFunction& function) {
+    AnalyzeFrameRelativeRedZone(function);
     if (!function.uses_red_zone) {
         return;
     }

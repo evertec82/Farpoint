@@ -85,7 +85,8 @@
     "size_limit": 52428800,
     "skip_duplicate": true,
     "sync": false,
-    "type": "file"
+    "type": "file",
+    "flush_level": "critical"
   },
   "Vulkan": {
     "gpu_id": -1,

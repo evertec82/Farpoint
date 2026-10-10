@@ -309,6 +309,8 @@ set(AUDIO_LIB src/core/libraries/audio/audioin.cpp
               src/core/libraries/ngs2/ngs2.cpp
               src/core/libraries/ngs2/ngs2.h
               src/core/libraries/audio3d/audio3d.cpp
+              src/core/libraries/audio3d/audio3d_spatializer.cpp
+              src/core/libraries/audio3d/audio3d_spatializer.h
               src/core/libraries/audio3d/audio3d_openal.cpp
               src/core/libraries/audio3d/audio3d_openal.h
               src/core/libraries/audio3d/audio3d.h
@@ -472,6 +474,8 @@ set(SYSTEM_LIBS src/core/libraries/system/commondialog.cpp
                 src/core/libraries/ngs2/ngs2_submixer.h
                 src/core/libraries/ajm/ajm_error.h
                 src/core/libraries/audio3d/audio3d.cpp
+              src/core/libraries/audio3d/audio3d_spatializer.cpp
+              src/core/libraries/audio3d/audio3d_spatializer.h
                 src/core/libraries/audio3d/audio3d.h
                 src/core/libraries/audio3d/audio3d_error.h
                 src/core/libraries/game_live_streaming/gamelivestreaming.cpp

@@ -1,15 +1,15 @@
-# Farpoint PC VR v0.5.0 - Stack Protection and Audio Prerelease
+# Farpoint PC VR v0.6.0 - Revised Stack Protection and Spatial Audio
 
 This experimental build uses shadPS4 baseline `06e813ff8c8e2a6d81b02cabfcc9543c3debf78e` with the Farpoint OpenXR port. Install in a separate folder for comparison with the earlier build.
 
-## Changes in v0.5.0
+## Changes in v0.6.0
 
-- Extends Windows guest stack protection to temporary data addressed through the frame pointer. This addresses a coverage gap affecting the stack slot seen corrupted in repeated render-thread crashes.
-- Queues audio samples submitted through the single-attribute 3D-audio API, matching the batch API. Previously that path stored the descriptor without submitting the samples for playback.
-- Adds pointer/count details to invalid audio-batch reports.
-- Retains the Virtual Desktop exception fix, expanded crash reporting, launcher and resolution options from v0.4.0.
+- Replaces v0.5.0's overbroad frame-pointer protection with control-flow-aware stack offsets, so ordinary allocated locals do not consume protective patch space. The real-module startup check no longer exhausted patch space; unrelocatable instructions fell from 2,619,026 to 292 in that comparison.
+- Restores the earlier spatial-audio implementation and corrects position, gain and reset attribute numbers in both audio backends. The previous mapping could interpret position data as volume.
+- Adds sparse audio-mix signal diagnostics, reduces repeated zero-length batch log noise, and enables fatal-level log flushing.
+- Retains the Virtual Desktop exception fix, expanded crash reports, launcher and resolution options.
 
-**These are candidate fixes, not confirmed gameplay fixes.** The Windows build, executable smoke check and focused production-decoder probe passed. Replaying the failing scene and verifying audio are still required. Broader stack protection may increase startup time and runtime overhead, and some instructions remain unrelocatable. Existing rendering issues remain under investigation.
+**Gameplay verification is still pending.** Compilation, a production-analysis probe on the complete crashing routine, and an isolated startup check passed. The audio trace confirms gain values are interpreted correctly, but audible gameplay and the original crash scene have not been verified. Remaining unrelocatable instructions, rendering artifacts and crashes are still under investigation.
 
 ## Included
 
@@ -22,7 +22,7 @@ This experimental build uses shadPS4 baseline `06e813ff8c8e2a6d81b02cabfcc9543c3
 
 ## First-time installation
 
-1. Download **Farpoint-PC-VR-v0.5.0-First-Install.zip** and extract it to a new writable folder.
+1. Download **Farpoint-PC-VR-v0.6.0-First-Install.zip** and extract it to a new writable folder.
 2. Put your own **Farpoint CUSA04508 version 1.00** package in that root folder, beside **Play Farpoint.bat**, and name it **Farpoint.pkg**. Do not put it inside `pc-vr`.
 3. Connect your headset using your OpenXR runtime, such as SteamVR or Virtual Desktop VDXR.
 4. Open **Play Farpoint.bat**, choose your settings and start. First launch extracts the compatible zero-passcode package, restores metadata and generates resolution profiles. Keep the console open until setup finishes.
@@ -52,5 +52,6 @@ The source for this candidate is on the `farpoint-upstream-preview` branch. See 
 - v0.3.0: Crash reporting and time-query guard.
 - v0.4.0: Newer shadPS4 comparison, Virtual Desktop fix and expanded diagnostics.
 - v0.5.0: Frame-pointer stack protection and single-attribute audio submission candidate fixes.
+- v0.6.0: Narrower stack protection, restored spatial audio and corrected audio attribute mapping.
 
 Versions increase with each published revision. Existing release URLs are retained.

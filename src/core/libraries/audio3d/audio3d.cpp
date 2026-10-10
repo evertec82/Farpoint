@@ -2,8 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
-#include <vector>
 #include <fmt/format.h>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
 #include <magic_enum/magic_enum.hpp>
 
 #include "common/assert.h"
@@ -23,79 +26,116 @@ static constexpr AudioOut::OrbisAudioOutParamFormat AUDIO3D_OUTPUT_FORMAT =
     AudioOut::OrbisAudioOutParamFormat::S16Stereo;
 static constexpr u32 AUDIO3D_OUTPUT_NUM_CHANNELS = 2;
 
-static constexpr float DOWNMIX_FRONT = 1.0f;
-static constexpr float DOWNMIX_CENTER = 0.7071f;
-static constexpr float DOWNMIX_SURROUND = 0.7071f;
-static constexpr float DOWNMIX_LFE = 0.0f;
-
 static std::unique_ptr<Audio3dState> state;
 
-struct AudioOutBufferInfo {
-    u32 channels;
-    u32 sample_size;
-};
-
-static AudioOutBufferInfo GetAudioOutBufferInfo(const AudioOut::OrbisAudioOutParamFormat format) {
-    using Format = AudioOut::OrbisAudioOutParamFormat;
-    switch (format) {
-    case Format::S16Mono:
-        return {1, sizeof(s16)};
-    case Format::S16Stereo:
-        return {2, sizeof(s16)};
-    case Format::S16_8CH:
-    case Format::S16_8CH_Std:
-        return {8, sizeof(s16)};
-    case Format::FloatMono:
-        return {1, sizeof(float)};
-    case Format::FloatStereo:
-        return {2, sizeof(float)};
-    case Format::Float_8CH:
-    case Format::Float_8CH_Std:
-        return {8, sizeof(float)};
-    default:
-        return {2, sizeof(s16)};
-    }
+/// SHADPS4_AUDIO3D_TRACE=1 logs, a few times a second, where the loudest objects are.
+static bool TraceEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_AUDIO3D_TRACE");
+        return value != nullptr && *value != '\0' && *value != '0';
+    }();
+    return enabled;
 }
 
-static s32 DrainAssociatedPorts(Port& port) {
-    while (true) {
-        s32 handle = -1;
-        std::vector<u8> buffer;
-        {
-            std::scoped_lock lock{port.mutex};
-            const auto it =
-                std::find_if(port.audioout_ports.begin(), port.audioout_ports.end(),
-                             [](const AssociatedAudioOutPort& p) { return !p.pending.empty(); });
-            if (it == port.audioout_ports.end()) {
-                return ORBIS_OK;
-            }
-            handle = it->handle;
-            buffer = std::move(it->pending.front());
-            it->pending.pop_front();
-        }
+static void ResetObject(ObjectState& obj) {
+    obj.pcm.clear();
+    obj.has_pcm = false;
+    obj.placement = {};
+    obj.priority = 0;
+    obj.passthrough = false;
+    obj.ambisonic_channel = -1;
+    obj.spatializer.Reset();
+    obj.persistent_attributes.clear();
+}
 
-        const s32 ret = AudioOut::sceAudioOutOutput(handle, buffer.data());
-        if (ret < 0) {
-            return ret;
+/// Applies one attribute other than a reset to an object.
+static s32 ApplyAttribute(const Port& port, ObjectState& obj, const OrbisAudio3dAttributeId id,
+                          const void* value, const u64 size) {
+    const auto read = [&](auto& out) {
+        if (value != nullptr && size >= sizeof(out)) {
+            std::memcpy(&out, value, sizeof(out));
+            return true;
         }
+        return false;
+    };
+
+    switch (id) {
+    case OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_PCM: {
+        OrbisAudio3dPcm pcm{};
+        if (!read(pcm)) {
+            LOG_ERROR(Lib_Audio3d, "PCM attribute value_size too small");
+            return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER;
+        }
+        if (!pcm.sample_buffer || !pcm.num_samples) {
+            return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER;
+        }
+        // An object carries one channel, one block at a time: what is set replaces what was
+        // not played yet. A short block is padded with silence.
+        const u32 granularity = port.parameters.granularity;
+        const u32 count = std::min(pcm.num_samples, granularity);
+        obj.pcm.assign(granularity, 0.0f);
+        if (pcm.format == OrbisAudio3dFormat::ORBIS_AUDIO3D_FORMAT_S16) {
+            const auto* source = static_cast<const s16*>(pcm.sample_buffer);
+            for (u32 i = 0; i < count; ++i) {
+                obj.pcm[i] = source[i] / 32768.0f;
+            }
+        } else {
+            std::memcpy(obj.pcm.data(), pcm.sample_buffer, count * sizeof(float));
+        }
+        obj.has_pcm = true;
+        return ORBIS_OK;
+    }
+    case OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_POSITION: {
+        float position[3];
+        if (read(position)) {
+            obj.placement.x = position[0];
+            obj.placement.y = position[1];
+            obj.placement.z = position[2];
+        }
+        return ORBIS_OK;
+    }
+    case OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_GAIN:
+        read(obj.placement.gain);
+        return ORBIS_OK;
+    case OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_SPREAD:
+        read(obj.placement.spread);
+        return ORBIS_OK;
+    case OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_PRIORITY:
+        read(obj.priority);
+        return ORBIS_OK;
+    case OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_AMBISONICS: {
+        u32 channel = 0;
+        if (read(channel)) {
+            obj.ambisonic_channel = static_cast<s32>(channel);
+        }
+        return ORBIS_OK;
+    }
+    case OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_PASSTHROUGH: {
+        u32 enabled = 0;
+        if (read(enabled)) {
+            obj.passthrough = enabled != 0;
+        }
+        return ORBIS_OK;
+    }
+    default:
+        if (value != nullptr && size > 0 && size <= 4096) {
+            const auto* src = static_cast<const u8*>(value);
+            obj.persistent_attributes[static_cast<u32>(id)].assign(src, src + size);
+        }
+        return ORBIS_OK;
     }
 }
 
 s32 PS4_SYSV_ABI sceAudio3dAudioOutClose(const s32 handle) {
     LOG_INFO(Lib_Audio3d, "called, handle = {}", handle);
 
-    bool found = false;
+    // Remove from any port that was tracking this handle.
     if (state) {
         for (auto& [port_id, port] : state->ports) {
             std::scoped_lock lock{port.mutex};
-            found |= std::erase_if(port.audioout_ports, [&](const AssociatedAudioOutPort& p) {
-                         return p.handle == handle;
-                     }) != 0;
+            auto& handles = port.audioout_handles;
+            handles.erase(std::remove(handles.begin(), handles.end(), handle), handles.end());
         }
-    }
-    if (!found) {
-        LOG_ERROR(Lib_Audio3d, "handle {} was not opened via sceAudio3dAudioOutOpen", handle);
-        return ORBIS_AUDIO3D_ERROR_INVALID_PORT;
     }
 
     return AudioOut::sceAudioOutClose(handle);
@@ -126,13 +166,8 @@ s32 PS4_SYSV_ABI sceAudio3dAudioOutOpen(
         return handle;
     }
 
-    const auto info = GetAudioOutBufferInfo(param.data_format.Value());
-    AssociatedAudioOutPort aout{};
-    aout.handle = handle;
-    aout.buffer_bytes = len * info.channels * info.sample_size;
-    aout.samples_per_buffer = len * info.channels;
-    aout.is_float = info.sample_size == sizeof(float);
-    state->ports[port_id].audioout_ports.push_back(std::move(aout));
+    // Track this handle in the port so sceAudio3dPortFlush can use it for sync.
+    state->ports[port_id].audioout_handles.push_back(handle);
     return handle;
 }
 
@@ -149,35 +184,7 @@ s32 PS4_SYSV_ABI sceAudio3dAudioOutOutput(const s32 handle, void* ptr) {
         return ORBIS_AUDIO3D_ERROR_INVALID_PORT;
     }
 
-    if (state) {
-        for (auto& [port_id, port] : state->ports) {
-            std::scoped_lock lock{port.mutex};
-            for (auto& aout : port.audioout_ports) {
-                if (aout.handle != handle) {
-                    continue;
-                }
-
-                const uintptr_t align_mask = aout.is_float ? 3u : 1u;
-                if ((reinterpret_cast<uintptr_t>(ptr) & align_mask) != 0) {
-                    LOG_ERROR(Lib_Audio3d, "sample buffer for handle {} is misaligned", handle);
-                    return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER;
-                }
-
-                if (aout.pending.size() >= port.parameters.queue_depth) {
-                    return ORBIS_AUDIO3D_ERROR_NOT_READY;
-                }
-
-                const u8* src = static_cast<const u8*>(ptr);
-                aout.pending.emplace_back(src, src + aout.buffer_bytes);
-
-                // Mirror sceAudioOutOutput's return of samples sent.
-                return static_cast<s32>(aout.samples_per_buffer);
-            }
-        }
-    }
-
-    LOG_ERROR(Lib_Audio3d, "handle {} was not opened via sceAudio3dAudioOutOpen", handle);
-    return ORBIS_AUDIO3D_ERROR_INVALID_PORT;
+    return AudioOut::sceAudioOutOutput(handle, ptr);
 }
 
 s32 PS4_SYSV_ABI sceAudio3dAudioOutOutputs(AudioOut::OrbisAudioOutOutputParam* param,
@@ -185,48 +192,31 @@ s32 PS4_SYSV_ABI sceAudio3dAudioOutOutputs(AudioOut::OrbisAudioOutOutputParam* p
     LOG_DEBUG(Lib_Audio3d, "called, param = {}, num = {}", static_cast<void*>(param), num);
 
     if (!param || !num) {
-        LOG_ERROR(Lib_Audio3d, "Invalid audio output batch: param={}, num={}",
+        LOG_DEBUG(Lib_Audio3d, "Invalid audio output batch: param={}, num={}",
                   static_cast<void*>(param), num);
         return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER;
     }
 
-    for (u32 i = 0; i < num; i++) {
-        const s32 ret = sceAudio3dAudioOutOutput(param[i].handle, param[i].ptr);
-        if (ret < 0) {
-            return ret;
-        }
-    }
-
-    return ORBIS_OK;
+    return AudioOut::sceAudioOutOutputs(param, num);
 }
 
 static s32 ConvertAndEnqueue(std::deque<AudioData>& queue, const OrbisAudio3dPcm& pcm,
-                             const u32 num_channels, const u32 granularity, const u32 max_entries) {
+                             const u32 num_channels, const u32 granularity) {
     if (!pcm.sample_buffer || !pcm.num_samples) {
-        LOG_ERROR(Lib_Audio3d, "!pcm.sample_buffer || !pcm.num_samples");
         return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER;
     }
 
     const u32 bytes_per_sample =
         (pcm.format == OrbisAudio3dFormat::ORBIS_AUDIO3D_FORMAT_S16) ? sizeof(s16) : sizeof(float);
 
-    if ((reinterpret_cast<uintptr_t>(pcm.sample_buffer) & (bytes_per_sample - 1)) != 0) {
-        LOG_ERROR(Lib_Audio3d, "pcm.sample_buffer is misaligned");
-        return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER;
-    }
-
-    if (queue.size() >= max_entries) {
-        LOG_ERROR(Lib_Audio3d, "queue.size() >= max_entries");
-        return ORBIS_AUDIO3D_ERROR_NOT_READY;
-    }
-
+    // Always allocate exactly granularity samples (zeroed = silence for padding).
     const u32 dst_bytes = granularity * num_channels * bytes_per_sample;
     u8* copy = static_cast<u8*>(std::calloc(1, dst_bytes));
     if (!copy) {
-        LOG_ERROR(Lib_Audio3d, "out of memory");
         return ORBIS_AUDIO3D_ERROR_OUT_OF_MEMORY;
     }
 
+    // Copy min(provided, granularity) samples — extra are dropped, shortage stays zero.
     const u32 samples_to_copy = std::min(pcm.num_samples, granularity);
     std::memcpy(copy, pcm.sample_buffer, samples_to_copy * num_channels * bytes_per_sample);
 
@@ -263,8 +253,8 @@ s32 PS4_SYSV_ABI sceAudio3dBedWrite2(const OrbisAudio3dPortId port_id, const u32
         return ORBIS_AUDIO3D_ERROR_INVALID_PORT;
     }
 
-    if (output_route > OrbisAudio3dOutputRoute::ORBIS_AUDIO3D_OUTPUT_TV_ONLY) {
-        LOG_ERROR(Lib_Audio3d, "Invalid output_route {}", static_cast<u32>(output_route));
+    if (output_route > OrbisAudio3dOutputRoute::ORBIS_AUDIO3D_OUTPUT_BOTH) {
+        LOG_ERROR(Lib_Audio3d, "output_route > ORBIS_AUDIO3D_OUTPUT_BOTH");
         return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER;
     }
 
@@ -302,8 +292,7 @@ s32 PS4_SYSV_ABI sceAudio3dBedWrite2(const OrbisAudio3dPortId port_id, const u32
                                  .sample_buffer = buffer,
                                  .num_samples = num_samples,
                              },
-                             num_channels, state->ports[port_id].parameters.granularity,
-                             state->ports[port_id].parameters.queue_depth);
+                             num_channels, state->ports[port_id].parameters.granularity);
 }
 
 s32 PS4_SYSV_ABI sceAudio3dCreateSpeakerArray() {
@@ -437,35 +426,13 @@ s32 PS4_SYSV_ABI sceAudio3dObjectSetAttribute(const OrbisAudio3dPortId port_id,
     }
 
     auto& obj = port.objects[object_id];
-    if (obj.unreserved) {
-        LOG_ERROR(Lib_Audio3d, "object_id not reserved");
-        return ORBIS_AUDIO3D_ERROR_INVALID_OBJECT;
-    }
 
+    // RESET_STATE clears all attributes and pending PCM; it takes no value.
     if (attribute_id == OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_RESET_STATE) {
-        for (auto& data : obj.pcm_queue) {
-            std::free(data.sample_buffer);
-        }
-        obj.pcm_queue.clear();
-        obj.persistent_attributes.clear();
-        LOG_DEBUG(Lib_Audio3d, "RESET_STATE for object {}", object_id);
+        ResetObject(obj);
         return ORBIS_OK;
     }
-
-    if (!attribute) {
-        return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER;
-    }
-    if (attribute_id == OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_PCM) {
-        if (attribute_size < sizeof(OrbisAudio3dPcm)) {
-            return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER;
-        }
-        return ConvertAndEnqueue(obj.pcm_queue, *static_cast<const OrbisAudio3dPcm*>(attribute), 1,
-                                 port.parameters.granularity, port.parameters.queue_depth);
-    }
-    const auto* src = static_cast<const u8*>(attribute);
-    obj.persistent_attributes[static_cast<u32>(attribute_id)].assign(src, src + attribute_size);
-
-    return ORBIS_OK;
+    return ApplyAttribute(port, obj, attribute_id, attribute, attribute_size);
 }
 
 s32 PS4_SYSV_ABI sceAudio3dObjectSetAttributes(const OrbisAudio3dPortId port_id,
@@ -494,55 +461,26 @@ s32 PS4_SYSV_ABI sceAudio3dObjectSetAttributes(const OrbisAudio3dPortId port_id,
     }
 
     auto& obj = port.objects[object_id];
-    if (obj.unreserved) {
-        LOG_ERROR(Lib_Audio3d, "object_id not reserved");
-        return ORBIS_AUDIO3D_ERROR_INVALID_OBJECT;
-    }
 
+    // A reset comes first wherever it is listed.
     for (u64 i = 0; i < num_attributes; i++) {
         if (attribute_array[i].attribute_id ==
             OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_RESET_STATE) {
-            for (auto& data : obj.pcm_queue) {
-                std::free(data.sample_buffer);
-            }
-            obj.pcm_queue.clear();
-            obj.persistent_attributes.clear();
-            LOG_DEBUG(Lib_Audio3d, "RESET_STATE for object {}", object_id);
-            break; // Only one reset is needed even if listed multiple times.
+            ResetObject(obj);
+            break;
         }
     }
 
-    // apply all other attributes.
     for (u64 i = 0; i < num_attributes; i++) {
         const auto& attribute = attribute_array[i];
-
-        switch (attribute.attribute_id) {
-        case OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_RESET_STATE:
-            break; // Already applied in first pass above.
-        case OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_PCM: {
-            if (attribute.value_size < sizeof(OrbisAudio3dPcm)) {
-                LOG_ERROR(Lib_Audio3d, "PCM attribute value_size too small");
-                continue;
-            }
-            const auto pcm = static_cast<OrbisAudio3dPcm*>(attribute.value);
-            if (const auto ret =
-                    ConvertAndEnqueue(obj.pcm_queue, *pcm, 1, port.parameters.granularity,
-                                      port.parameters.queue_depth);
-                ret != ORBIS_OK) {
-                return ret;
-            }
-            break;
+        if (attribute.attribute_id ==
+            OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_RESET_STATE) {
+            continue;
         }
-        default: {
-            if (attribute.value && attribute.value_size > 0) {
-                const auto* src = static_cast<const u8*>(attribute.value);
-                obj.persistent_attributes[static_cast<u32>(attribute.attribute_id)].assign(
-                    src, src + attribute.value_size);
-            }
-            LOG_DEBUG(Lib_Audio3d, "Stored attribute {:#x} for object {}",
-                      static_cast<u32>(attribute.attribute_id), object_id);
-            break;
-        }
+        if (const s32 ret = ApplyAttribute(port, obj, attribute.attribute_id, attribute.value,
+                                           attribute.value_size);
+            ret != ORBIS_OK) {
+            return ret;
         }
     }
 
@@ -566,174 +504,7 @@ s32 PS4_SYSV_ABI sceAudio3dObjectUnreserve(const OrbisAudio3dPortId port_id,
         return ORBIS_AUDIO3D_ERROR_INVALID_OBJECT;
     }
 
-    auto& obj = port.objects[object_id];
-    if (obj.unreserved) {
-        LOG_ERROR(Lib_Audio3d, "object_id not reserved");
-        return ORBIS_AUDIO3D_ERROR_INVALID_OBJECT;
-    }
-
-    if (!obj.pcm_queue.empty()) {
-        obj.unreserved = true;
-        return ORBIS_OK;
-    }
-
     port.objects.erase(object_id);
-    return ORBIS_OK;
-}
-
-static u32 ProcessMixQueue(Port& port) {
-    const u32 granularity = port.parameters.granularity;
-    const u32 out_samples = granularity * AUDIO3D_OUTPUT_NUM_CHANNELS;
-
-    // ---- FLOAT MIX BUFFER ----
-    float* mix_float = static_cast<float*>(std::calloc(out_samples, sizeof(float)));
-
-    if (!mix_float)
-        return ORBIS_AUDIO3D_ERROR_OUT_OF_MEMORY;
-
-    auto mix_in = [&](std::deque<AudioData>& queue, const float gain) {
-        if (queue.empty())
-            return;
-
-        // default gain is 0.0 — objects with no GAIN set are silent.
-        if (gain == 0.0f) {
-            AudioData data = queue.front();
-            queue.pop_front();
-            std::free(data.sample_buffer);
-            return;
-        }
-
-        AudioData data = queue.front();
-        queue.pop_front();
-
-        const u32 frames = std::min(granularity, data.num_samples);
-        const u32 channels = data.num_channels;
-
-        if (data.format == OrbisAudio3dFormat::ORBIS_AUDIO3D_FORMAT_S16) {
-            const s16* src = reinterpret_cast<const s16*>(data.sample_buffer);
-
-            for (u32 i = 0; i < frames; i++) {
-                float left = 0.0f;
-                float right = 0.0f;
-
-                if (channels == 1) {
-                    float v = src[i] / 32768.0f;
-                    left = v;
-                    right = v;
-                } else {
-                    const auto sample = [&](const u32 c) {
-                        return src[i * channels + c] / 32768.0f;
-                    };
-                    left = DOWNMIX_FRONT * sample(0);
-                    right = DOWNMIX_FRONT * sample(1);
-                    if (channels >= 3) {
-                        const float center = DOWNMIX_CENTER * sample(2);
-                        left += center;
-                        right += center;
-                    }
-                    if constexpr (DOWNMIX_LFE != 0.0f) {
-                        if (channels >= 4) {
-                            const float lfe = DOWNMIX_LFE * sample(3);
-                            left += lfe;
-                            right += lfe;
-                        }
-                    }
-                    if (channels >= 6) {
-                        left += DOWNMIX_SURROUND * sample(4);
-                        right += DOWNMIX_SURROUND * sample(5);
-                    }
-                    if (channels >= 8) {
-                        left += DOWNMIX_SURROUND * sample(6);
-                        right += DOWNMIX_SURROUND * sample(7);
-                    }
-                }
-
-                mix_float[i * 2 + 0] += left * gain;
-                mix_float[i * 2 + 1] += right * gain;
-            }
-        } else { // FLOAT input
-            const float* src = reinterpret_cast<const float*>(data.sample_buffer);
-
-            for (u32 i = 0; i < frames; i++) {
-                float left = 0.0f;
-                float right = 0.0f;
-
-                if (channels == 1) {
-                    left = src[i];
-                    right = src[i];
-                } else {
-                    // Same multichannel fold as the S16 branch above.
-                    const auto sample = [&](const u32 c) { return src[i * channels + c]; };
-                    left = DOWNMIX_FRONT * sample(0);
-                    right = DOWNMIX_FRONT * sample(1);
-                    if (channels >= 3) {
-                        const float center = DOWNMIX_CENTER * sample(2);
-                        left += center;
-                        right += center;
-                    }
-                    if constexpr (DOWNMIX_LFE != 0.0f) {
-                        if (channels >= 4) {
-                            const float lfe = DOWNMIX_LFE * sample(3);
-                            left += lfe;
-                            right += lfe;
-                        }
-                    }
-                    if (channels >= 6) {
-                        left += DOWNMIX_SURROUND * sample(4);
-                        right += DOWNMIX_SURROUND * sample(5);
-                    }
-                    if (channels >= 8) {
-                        left += DOWNMIX_SURROUND * sample(6);
-                        right += DOWNMIX_SURROUND * sample(7);
-                    }
-                }
-
-                mix_float[i * 2 + 0] += left * gain;
-                mix_float[i * 2 + 1] += right * gain;
-            }
-        }
-
-        std::free(data.sample_buffer);
-    };
-
-    mix_in(port.bed_queue, 1.0f);
-
-    for (auto& [obj_id, obj] : port.objects) {
-        float gain = 0.0f;
-        const auto gain_key =
-            static_cast<u32>(OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_GAIN);
-        if (obj.persistent_attributes.contains(gain_key)) {
-            const auto& blob = obj.persistent_attributes.at(gain_key);
-            if (blob.size() >= sizeof(float)) {
-                std::memcpy(&gain, blob.data(), sizeof(float));
-            }
-        }
-        mix_in(obj.pcm_queue, gain);
-    }
-
-    s16* mix_s16 = static_cast<s16*>(std::malloc(out_samples * sizeof(s16)));
-
-    if (!mix_s16) {
-        std::free(mix_float);
-        return ORBIS_AUDIO3D_ERROR_OUT_OF_MEMORY;
-    }
-
-    for (u32 i = 0; i < out_samples; i++) {
-        float v = std::clamp(mix_float[i], -1.0f, 1.0f);
-        mix_s16[i] = static_cast<s16>(v * 32767.0f);
-    }
-
-    std::free(mix_float);
-
-    port.mixed_queue.push_back(AudioData{.sample_buffer = reinterpret_cast<u8*>(mix_s16),
-                                         .num_samples = granularity,
-                                         .num_channels = AUDIO3D_OUTPUT_NUM_CHANNELS,
-                                         .format = OrbisAudio3dFormat::ORBIS_AUDIO3D_FORMAT_S16});
-
-    std::erase_if(port.objects, [](const auto& kv) {
-        return kv.second.unreserved && kv.second.pcm_queue.empty();
-    });
-
     return ORBIS_OK;
 }
 
@@ -746,6 +517,7 @@ s32 PS4_SYSV_ABI sceAudio3dPortAdvance(const OrbisAudio3dPortId port_id) {
     }
 
     auto& port = state->ports[port_id];
+    std::scoped_lock lock{port.mutex};
 
     if (port.parameters.buffer_mode == OrbisAudio3dBufferMode::ORBIS_AUDIO3D_BUFFER_NO_ADVANCE) {
         LOG_ERROR(Lib_Audio3d, "port doesn't have advance capability");
@@ -758,7 +530,119 @@ s32 PS4_SYSV_ABI sceAudio3dPortAdvance(const OrbisAudio3dPortId port_id) {
         return ORBIS_AUDIO3D_ERROR_NOT_READY;
     }
 
-    return ProcessMixQueue(port);
+    const u32 granularity = port.parameters.granularity;
+    const u32 out_samples = granularity * AUDIO3D_OUTPUT_NUM_CHANNELS;
+    port.mix_buffer.assign(out_samples, 0.0f);
+    float* mix = port.mix_buffer.data();
+
+    // The bed is ordinary speaker audio and goes in as it is.
+    if (!port.bed_queue.empty()) {
+        AudioData data = port.bed_queue.front();
+        port.bed_queue.pop_front();
+        const u32 frames = std::min(granularity, data.num_samples);
+        const u32 channels = data.num_channels;
+        const bool is_s16 = data.format == OrbisAudio3dFormat::ORBIS_AUDIO3D_FORMAT_S16;
+        const auto sample = [&](u32 frame, u32 channel) {
+            const size_t at = size_t{frame} * channels + channel;
+            return is_s16 ? reinterpret_cast<const s16*>(data.sample_buffer)[at] / 32768.0f
+                          : reinterpret_cast<const float*>(data.sample_buffer)[at];
+        };
+        for (u32 i = 0; i < frames; i++) {
+            mix[i * 2 + 0] += sample(i, 0);
+            mix[i * 2 + 1] += sample(i, channels > 1 ? 1 : 0);
+        }
+        std::free(data.sample_buffer);
+    }
+
+    // Every object that got a block since the last advance is placed around the listener.
+    u32 active = 0;
+    const ObjectState* loudest = nullptr;
+    for (auto& [obj_id, obj] : port.objects) {
+        if (!obj.has_pcm) {
+            continue;
+        }
+        obj.has_pcm = false;
+        ++active;
+        if (obj.ambisonic_channel > 0) {
+            // The channels after the first describe from where the field arrives. Without a
+            // decoder for them the field is played through its first channel, which holds all
+            // of the sound and none of its direction.
+            continue;
+        }
+        if (obj.passthrough || obj.ambisonic_channel == 0) {
+            const float gain = obj.placement.gain;
+            for (u32 i = 0; i < granularity; i++) {
+                mix[i * 2 + 0] += obj.pcm[i] * gain;
+                mix[i * 2 + 1] += obj.pcm[i] * gain;
+            }
+        } else {
+            obj.spatializer.Process(obj.pcm.data(), granularity, mix, obj.placement,
+                                    static_cast<float>(AUDIO3D_SAMPLE_RATE));
+        }
+        if (loudest == nullptr || obj.placement.gain > loudest->placement.gain) {
+            loudest = &obj;
+        }
+    }
+
+    if (TraceEnabled() && (port.advance_count++ % 256) == 0 && loudest != nullptr) {
+        LOG_INFO(Lib_Audio3d, "trace: {} objects with sound", active);
+        u32 listed = 0;
+        for (const auto& [obj_id, obj] : port.objects) {
+            if (obj.pcm.empty() || ++listed > 24) {
+                continue;
+            }
+            std::string extra;
+            for (const auto& [id, blob] : obj.persistent_attributes) {
+                extra += fmt::format(" attr{}[{}]=", id, blob.size());
+                for (size_t i = 0; i < blob.size() && i < 16; ++i) {
+                    extra += fmt::format("{:02x}", blob[i]);
+                }
+            }
+            float peak = 0.0f;
+            for (const float sample : obj.pcm) {
+                peak = std::max(peak, std::abs(sample));
+            }
+            LOG_INFO(Lib_Audio3d,
+                     "trace:   #{} pos ({:.2f}, {:.2f}, {:.2f}) gain {:.3f} spread {:.2f} "
+                     "priority {} passthrough {} ambisonic {} peak {:.3f}{}",
+                     obj_id, obj.placement.x, obj.placement.y, obj.placement.z,
+                     obj.placement.gain, obj.placement.spread, obj.priority, obj.passthrough,
+                     obj.ambisonic_channel, peak, extra);
+        }
+    }
+
+    // Many objects at once can add up to more than full scale: turn the whole mix down then,
+    // and let it come back slowly.
+    s16* mix_s16 = static_cast<s16*>(std::malloc(out_samples * sizeof(s16)));
+    if (!mix_s16) {
+        return ORBIS_AUDIO3D_ERROR_OUT_OF_MEMORY;
+    }
+    float gain = port.limiter_gain;
+    for (u32 i = 0; i < granularity; i++) {
+        const float peak = std::max(std::abs(mix[i * 2]), std::abs(mix[i * 2 + 1]));
+        const float target = peak > 1.0f ? 1.0f / peak : 1.0f;
+        gain = target < gain ? target : gain + (target - gain) * 0.0002f;
+        mix_s16[i * 2 + 0] = static_cast<s16>(std::clamp(mix[i * 2 + 0] * gain, -1.0f, 1.0f) *
+                                              32767.0f);
+        mix_s16[i * 2 + 1] = static_cast<s16>(std::clamp(mix[i * 2 + 1] * gain, -1.0f, 1.0f) *
+                                              32767.0f);
+    }
+    port.limiter_gain = std::isfinite(gain) ? gain : 1.0f;
+    if ((port.diagnostic_mix_count++ % 512) == 0) {
+        s32 peak = 0;
+        for (u32 i = 0; i < out_samples; ++i) {
+            peak = std::max(peak, std::abs(static_cast<s32>(mix_s16[i])));
+        }
+        LOG_INFO(Lib_Audio3d, "Spatial audio mix: active_objects={}, peak={}, queued={}",
+                 active, peak, port.mixed_queue.size());
+    }
+
+    port.mixed_queue.push_back(AudioData{.sample_buffer = reinterpret_cast<u8*>(mix_s16),
+                                         .num_samples = granularity,
+                                         .num_channels = AUDIO3D_OUTPUT_NUM_CHANNELS,
+                                         .format = OrbisAudio3dFormat::ORBIS_AUDIO3D_FORMAT_S16});
+
+    return ORBIS_OK;
 }
 s32 PS4_SYSV_ABI sceAudio3dPortClose(const OrbisAudio3dPortId port_id) {
     LOG_INFO(Lib_Audio3d, "called, port_id = {}", port_id);
@@ -777,10 +661,10 @@ s32 PS4_SYSV_ABI sceAudio3dPortClose(const OrbisAudio3dPortId port_id) {
             port.audio_out_handle = -1;
         }
 
-        for (const auto& aout : port.audioout_ports) {
-            AudioOut::sceAudioOutClose(aout.handle);
+        for (const s32 handle : port.audioout_handles) {
+            AudioOut::sceAudioOutClose(handle);
         }
-        port.audioout_ports.clear();
+        port.audioout_handles.clear();
 
         for (auto& data : port.mixed_queue) {
             std::free(data.sample_buffer);
@@ -790,11 +674,6 @@ s32 PS4_SYSV_ABI sceAudio3dPortClose(const OrbisAudio3dPortId port_id) {
             std::free(data.sample_buffer);
         }
 
-        for (auto& [obj_id, obj] : port.objects) {
-            for (auto& data : obj.pcm_queue) {
-                std::free(data.sample_buffer);
-            }
-        }
     }
 
     state->ports.erase(port_id);
@@ -836,12 +715,9 @@ s32 PS4_SYSV_ABI sceAudio3dPortFlush(const OrbisAudio3dPortId port_id) {
     auto& port = state->ports[port_id];
     std::scoped_lock lock{port.mutex};
 
-    if (!port.audioout_ports.empty()) {
-        if (const s32 ret = DrainAssociatedPorts(port); ret < 0) {
-            return ret;
-        }
-        for (const auto& aout : port.audioout_ports) {
-            const s32 ret = AudioOut::sceAudioOutOutput(aout.handle, nullptr);
+    if (!port.audioout_handles.empty()) {
+        for (const s32 handle : port.audioout_handles) {
+            const s32 ret = AudioOut::sceAudioOutOutput(handle, nullptr);
             if (ret < 0) {
                 return ret;
             }
@@ -853,8 +729,8 @@ s32 PS4_SYSV_ABI sceAudio3dPortFlush(const OrbisAudio3dPortId port_id) {
         // Only mix if there's actually something to mix.
         if (!port.bed_queue.empty() ||
             std::any_of(port.objects.begin(), port.objects.end(),
-                        [](const auto& kv) { return !kv.second.pcm_queue.empty(); })) {
-            const s32 ret = ProcessMixQueue(port);
+                        [](const auto& kv) { return kv.second.has_pcm; })) {
+            const s32 ret = sceAudio3dPortAdvance(port_id);
             if (ret != ORBIS_OK && ret != ORBIS_AUDIO3D_ERROR_NOT_READY) {
                 return ret;
             }
@@ -907,23 +783,25 @@ s32 PS4_SYSV_ABI sceAudio3dPortGetAttributesSupported(OrbisAudio3dPortId port_id
         return ORBIS_AUDIO3D_ERROR_INVALID_PORT;
     }
 
+    static constexpr OrbisAudio3dAttributeId Supported[] = {
+        OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_PCM,
+        OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_PRIORITY,
+        OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_POSITION,
+        OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_SPREAD,
+        OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_GAIN,
+        OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_PASSTHROUGH,
+        OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_RESET_STATE,
+    };
+    const u32 supported = static_cast<u32>(std::size(Supported));
     if (capabilities) {
         // Writes up to num_capabilities supported capabilities,
         // then sets num_capabilities to how many were written.
-        u32 caps_to_write = *num_capabilities;
-        if (caps_to_write >= 1) {
-            capabilities[0] = OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_PCM;
-        }
-        if (caps_to_write >= 2) {
-            capabilities[1] = OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_GAIN;
-        }
-        if (caps_to_write >= 3) {
-            capabilities[2] = OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_RESET_STATE;
-        }
-        *num_capabilities = std::min<u32>(caps_to_write, 3);
+        const u32 count = std::min(*num_capabilities, supported);
+        std::copy_n(Supported, count, capabilities);
+        *num_capabilities = count;
     } else {
         // If capabilities is null, then just report the number of supported capabilities.
-        *num_capabilities = 3;
+        *num_capabilities = supported;
     }
     return ORBIS_OK;
 }
@@ -1116,6 +994,11 @@ s32 PS4_SYSV_ABI sceAudio3dPortOpen(const Libraries::UserService::OrbisUserServi
 
     auto& port = state->ports.try_emplace(id).first->second;
     port.parameters = effective;
+    LOG_INFO(Lib_Audio3d,
+             "port {} opened: granularity {}, max_objects {}, queue_depth {}, buffer_mode {}, "
+             "num_beds {} (size_this {:#x})",
+             id, effective.granularity, effective.max_objects, effective.queue_depth,
+             static_cast<u32>(effective.buffer_mode), effective.num_beds, parameters->size_this);
 
     *port_id = id;
 
@@ -1140,12 +1023,6 @@ s32 PS4_SYSV_ABI sceAudio3dPortPush(const OrbisAudio3dPortId port_id,
         return ORBIS_AUDIO3D_ERROR_NOT_SUPPORTED;
     }
 
-    const u32 depth = port.parameters.queue_depth;
-
-    if (const s32 ret = DrainAssociatedPorts(port); ret < 0) {
-        return ret;
-    }
-
     if (port.audio_out_handle < 0) {
         AudioOut::OrbisAudioOutParamExtendedInformation ext_info{};
         ext_info.data_format.Assign(AUDIO3D_OUTPUT_FORMAT);
@@ -1158,64 +1035,27 @@ s32 PS4_SYSV_ABI sceAudio3dPortPush(const OrbisAudio3dPortId port_id,
             return port.audio_out_handle;
     }
 
-    auto submit_one_frame = [&](bool& submitted) -> s32 {
+    // Hands what has been advanced to the output. Each frame waits for the one before it to be
+    // taken, which is what paces a synchronous push; an asynchronous one sends a single frame.
+    while (true) {
         AudioData frame;
         {
             std::scoped_lock lock{port.mutex};
-
             if (port.mixed_queue.empty()) {
-                submitted = false;
-                return ORBIS_OK;
+                break;
             }
-
             frame = port.mixed_queue.front();
             port.mixed_queue.pop_front();
         }
 
         const s32 ret = AudioOut::sceAudioOutOutput(port.audio_out_handle, frame.sample_buffer);
-
         std::free(frame.sample_buffer);
-
-        if (ret < 0)
+        if (ret < 0) {
             return ret;
-
-        submitted = true;
-        return ORBIS_OK;
-    };
-
-    {
-        std::scoped_lock lock{port.mutex};
-        if (port.mixed_queue.size() < depth) {
-            return ORBIS_OK;
         }
-    }
-
-    bool submitted = false;
-    s32 ret = submit_one_frame(submitted);
-    if (ret < 0)
-        return ret;
-
-    if (!submitted)
-        return ORBIS_OK;
-
-    if (blocking == OrbisAudio3dBlocking::ORBIS_AUDIO3D_BLOCKING_ASYNC) {
-        return ORBIS_OK;
-    }
-
-    while (true) {
-        {
-            std::scoped_lock lock{port.mutex};
-            if (port.mixed_queue.size() < depth)
-                break;
-        }
-
-        bool drained = false;
-        ret = submit_one_frame(drained);
-        if (ret < 0)
-            return ret;
-
-        if (!drained)
+        if (blocking == OrbisAudio3dBlocking::ORBIS_AUDIO3D_BLOCKING_ASYNC) {
             break;
+        }
     }
 
     return ORBIS_OK;
