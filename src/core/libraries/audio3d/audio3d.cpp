@@ -185,7 +185,8 @@ s32 PS4_SYSV_ABI sceAudio3dAudioOutOutputs(AudioOut::OrbisAudioOutOutputParam* p
     LOG_DEBUG(Lib_Audio3d, "called, param = {}, num = {}", static_cast<void*>(param), num);
 
     if (!param || !num) {
-        LOG_ERROR(Lib_Audio3d, "!param || !num");
+        LOG_ERROR(Lib_Audio3d, "Invalid audio output batch: param={}, num={}",
+                  static_cast<void*>(param), num);
         return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER;
     }
 
@@ -451,6 +452,16 @@ s32 PS4_SYSV_ABI sceAudio3dObjectSetAttribute(const OrbisAudio3dPortId port_id,
         return ORBIS_OK;
     }
 
+    if (!attribute) {
+        return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER;
+    }
+    if (attribute_id == OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_PCM) {
+        if (attribute_size < sizeof(OrbisAudio3dPcm)) {
+            return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER;
+        }
+        return ConvertAndEnqueue(obj.pcm_queue, *static_cast<const OrbisAudio3dPcm*>(attribute), 1,
+                                 port.parameters.granularity, port.parameters.queue_depth);
+    }
     const auto* src = static_cast<const u8*>(attribute);
     obj.persistent_attributes[static_cast<u32>(attribute_id)].assign(src, src + attribute_size);
 

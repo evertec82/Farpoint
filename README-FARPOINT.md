@@ -1,6 +1,15 @@
-# Farpoint PC VR v0.4.0 — Newer shadPS4 Comparison Prerelease
+# Farpoint PC VR v0.5.0 - Stack Protection and Audio Prerelease
 
 This experimental build uses shadPS4 baseline `06e813ff8c8e2a6d81b02cabfcc9543c3debf78e` with the Farpoint OpenXR port. Install in a separate folder for comparison with the earlier build.
+
+## Changes in v0.5.0
+
+- Extends Windows guest stack protection to temporary data addressed through the frame pointer. This addresses a coverage gap affecting the stack slot seen corrupted in repeated render-thread crashes.
+- Queues audio samples submitted through the single-attribute 3D-audio API, matching the batch API. Previously that path stored the descriptor without submitting the samples for playback.
+- Adds pointer/count details to invalid audio-batch reports.
+- Retains the Virtual Desktop exception fix, expanded crash reporting, launcher and resolution options from v0.4.0.
+
+**These are candidate fixes, not confirmed gameplay fixes.** The Windows build, executable smoke check and focused production-decoder probe passed. Replaying the failing scene and verifying audio are still required. Broader stack protection may increase startup time and runtime overhead, and some instructions remain unrelocatable. Existing rendering issues remain under investigation.
 
 ## Included
 
@@ -13,7 +22,7 @@ This experimental build uses shadPS4 baseline `06e813ff8c8e2a6d81b02cabfcc9543c3
 
 ## First-time installation
 
-1. Download **Farpoint-PC-VR-v0.4.0-First-Install.zip** and extract it to a new writable folder.
+1. Download **Farpoint-PC-VR-v0.5.0-First-Install.zip** and extract it to a new writable folder.
 2. Put your own **Farpoint CUSA04508 version 1.00** package in that root folder, beside **Play Farpoint.bat**, and name it **Farpoint.pkg**. Do not put it inside `pc-vr`.
 3. Connect your headset using your OpenXR runtime, such as SteamVR or Virtual Desktop VDXR.
 4. Open **Play Farpoint.bat**, choose your settings and start. First launch extracts the compatible zero-passcode package, restores metadata and generates resolution profiles. Keep the console open until setup finishes.
@@ -42,5 +51,6 @@ The source for this candidate is on the `farpoint-upstream-preview` branch. See 
 - v0.2.0: Stability improvements.
 - v0.3.0: Crash reporting and time-query guard.
 - v0.4.0: Newer shadPS4 comparison, Virtual Desktop fix and expanded diagnostics.
+- v0.5.0: Frame-pointer stack protection and single-attribute audio submission candidate fixes.
 
 Versions increase with each published revision. Existing release URLs are retained.

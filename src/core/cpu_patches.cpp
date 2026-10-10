@@ -1288,6 +1288,13 @@ DecodedCodeInstruction DecodeCodeInstruction(uintptr_t address, uintptr_t end) {
 
     for (u8 index = 0; index < decoded.instruction.operand_count_visible; ++index) {
         const auto& operand = decoded.operands[index];
+        if (operand.type == ZYDIS_OPERAND_TYPE_MEMORY &&
+            operand.mem.base == ZYDIS_REGISTER_RBP && operand.mem.disp.size != 0 &&
+            operand.mem.disp.value < 0) {
+            // RBP-relative locals can be below RSP; no frame-to-stack offset is modeled here.
+            decoded.has_red_zone_operand = true;
+            decoded.has_unmodeled_red_zone_operand = true;
+        }
         if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY ||
             !IsStackPointerRegister(operand.mem.base) || operand.mem.disp.size == 0 ||
             operand.mem.disp.value >= 0) {
