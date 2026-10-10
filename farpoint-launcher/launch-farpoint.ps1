@@ -107,6 +107,7 @@ Copy-Item -LiteralPath $resolutionProfile -Destination $overridePath -Force
 $configPath = Join-Path $PSScriptRoot 'user/config.json'
 if (-not (Test-Path $configPath)) { throw 'Missing emulator profile. Use the complete development installation.' }
 $config = Get-Content $configPath -Raw | ConvertFrom-Json
+$config.General | Add-Member -NotePropertyName redzone_patches -NotePropertyValue $true -Force
 # Supersampled stereo targets exceed the original console direct-memory budget.
 # Keep a larger existing allowance if the user has configured one.
 $requiredExtraMemoryMb = if ($EyeWidth -ge 3072) { 6144 } elseif ($EyeWidth -ge 2160) { 4096 } elseif ($EyeWidth -ge 1536) { 2048 } else { 0 }
