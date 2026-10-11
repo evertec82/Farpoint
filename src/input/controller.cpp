@@ -350,7 +350,10 @@ void GameControllers::ResetLightbarColors() {
 }
 
 bool GameController::SetVibration(u8 smallMotor, u8 largeMotor) {
-    if (m_sdl_gamepad != nullptr) {
+    if (IsFirstController(this)) {
+        Core::Vr::Runtime::Instance().SetPadVibration(smallMotor, largeMotor);
+    }
+    if (m_sdl_gamepad != nullptr && !HeadsetPlays()) {
         return SDL_RumbleGamepad(m_sdl_gamepad, (smallMotor / 255.0f) * 0xFFFF,
                                  (largeMotor / 255.0f) * 0xFFFF, -1);
     }

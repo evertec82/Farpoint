@@ -44,7 +44,7 @@ public static class FarpointProfiles {
   string config=Encoding.UTF8.GetString(ReadConfig(pak,configName));
   if(!config.Contains("r.GarlicHeapSizeMB=2400")||!config.Contains("r.NeoGarlicHeapSizeMB=2784"))throw new InvalidDataException("Unsupported memory configuration");
   config=config.Replace("r.GarlicHeapSizeMB=2400","r.GarlicHeapSizeMB=3072").Replace("r.NeoGarlicHeapSizeMB=2784","r.NeoGarlicHeapSizeMB=3072");
-  config+="\n[SystemSettings]\nr.TonemapperGamma=2.0\n";
+  config+="\n[SystemSettings]\nr.TonemapperGamma=1.2\n";
   WriteOverride(Path.Combine(output,"pakchunk101-PCVR-MemoryBudget_P.pak"),configName,Encoding.UTF8.GetBytes(config));
   string assetName="Refuge/Content/Characters/TrackedCharacter/PlayerCharacterBP.uasset";
   byte[] asset=ReadConfig(pak,assetName);

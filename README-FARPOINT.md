@@ -1,12 +1,18 @@
-# Farpoint PC VR v0.7.0
+# Farpoint PC VR v0.7.5
 
 This experimental PC VR release uses shadPS4 baseline `06e813ff8c8e2a6d81b02cabfcc9543c3debf78e` with the Farpoint OpenXR port.
 
-## Changes
+## Changes in v0.7.5
+
+- Restores controller haptics by forwarding game vibration requests to OpenXR. Haptics were confirmed working in local headset testing.
+- Changes tone-mapper gamma from 2.0 to 1.2. Live comparisons confirmed that this control affects headset brightness, and 1.2 was preferred in the tested scene. Existing v0.7.0 profiles regenerate the gamma override on first launch.
+- Corrects the save-transfer instructions below.
+
+## Retained from v0.7.0
 
 - Raises the game graphics-memory pool to 3,072 MiB. Diagnostics found fragmentation preventing a 4 MiB allocation in the previous 2,400 MiB pool. A local session exceeded the old budget without that crash; this is a mitigation, not a guarantee of stability.
 - Limits single-pixel GPU readbacks to the actual pixel rather than copying unwritten row padding into guest memory. Green textures and overly bright lighting remain under investigation; this fix needs further gameplay validation.
-- Applies a tone-mapper gamma override of 2.0 to darken the image. This is a visual adjustment, not a correction for every lighting artifact.
+- Applies a tone-mapper gamma override of 1.2 to darken the image. This is a visual adjustment, not a correction for every lighting artifact.
 - Left thumbstick click toggles 3x movement speed; click again for normal speed. Both stick clicks still recenter and clear the toggle. Controller/focus loss also clears it.
 - Adjusts the right-hand Aim pose downward by 20 degrees and forward by approximately 7 inches.
 - Allows headset rendering to proceed when a desktop mirror frame is unavailable, reduces presentation-log noise, and retains full-refresh pacing. Performance improvement is not guaranteed.
@@ -17,7 +23,7 @@ Game-specific configuration and sprint overrides are generated locally from the 
 
 ## First-time installation
 
-1. Download **Farpoint-PC-VR-v0.7.0-First-Install.zip** and extract it to a new writable folder.
+1. Download **Farpoint-PC-VR-v0.7.5-First-Install.zip** and extract it to a new writable folder.
 2. Put your own **Farpoint CUSA04508 version 1.00** package in that root folder, beside **Play Farpoint.bat**, and name it **Farpoint.pkg**. Do not put it inside `pc-vr`.
 3. Connect your headset using your OpenXR runtime, such as SteamVR or Virtual Desktop VDXR.
 4. Open **Play Farpoint.bat**, choose your settings and start. First launch extracts the compatible zero-passcode package, restores metadata and generates resolution profiles. Keep the console open until setup finishes.
@@ -32,7 +38,7 @@ Right A/B: Cross/Square; left X/Y: Circle/Triangle. Left stick moves; right stic
 
 ## Existing installations
 
-Close the game and extract to a new folder. Select your existing complete extracted game's `eboot.bin` in the launcher, or supply `Farpoint.pkg` as described above. To retain progress, copy your existing `pc-vr/user/savedata` folder into the new `pc-vr/user` folder before starting. Setup regenerates the sprint and memory/gamma overrides beside that game's original pak files. Back up any custom overrides before using the same game directory.
+Close the game and extract to a new folder. Select your existing complete extracted game's `eboot.bin` in the launcher, or supply `Farpoint.pkg` as described above. To retain progress, copy your existing `pc-vr/user/home/1000/savedata/CUSA04508` folder into the new `pc-vr/user/home/1000/savedata` folder before starting. Setup regenerates the sprint and memory/gamma overrides beside that game's original pak files. Back up any custom overrides before using the same game directory.
 
 ## Report a crash
 
@@ -40,6 +46,6 @@ After a crash, right-click `pc-vr/collect-crash-report.ps1` and choose **Run wit
 
 ## Validation and known issues
 
-The emulator builds successfully. Launcher syntax, generated memory/gamma and sprint pack parity with the local candidates, and package integrity were checked. The latest gamma and single-pixel readback changes have not yet been confirmed in headset gameplay. Green/purple textures, excessive brightness, stretched geometry, performance limitations, and additional crashes may remain. This release remains a prerelease for testing and reports.
+The emulator builds successfully. Launcher syntax, generated memory/gamma and sprint pack parity with the local candidates, and package integrity were checked. The haptics correction and gamma response were confirmed locally. The single-pixel readback change is not yet confirmed to eliminate the texture issues. Green/purple textures, excessive brightness, stretched geometry, performance limitations, and additional crashes may remain. This release remains a prerelease for testing and reports.
 
 Source is on `farpoint-upstream-preview`; see `BUILD.txt` in the download for the exact source and executable identity and `BUILD-FARPOINT.md` in the repository for build instructions.
