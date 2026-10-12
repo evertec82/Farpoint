@@ -1,8 +1,17 @@
-# Farpoint PC VR v0.7.5
+# Farpoint PC VR v0.8.5
 
 This experimental PC VR release uses shadPS4 baseline `06e813ff8c8e2a6d81b02cabfcc9543c3debf78e` with the Farpoint OpenXR port.
 
-## Changes in v0.7.5
+## Changes in v0.8.5
+
+- Adds a saved rendered-FOV slider from 60% to 120%, defaulting to 110%. Select 100% for the original FOV. Changes apply when starting the game; wider values give more edge margin at the cost of sharpness at a fixed resolution.
+- Moves crouch (Circle) to right thumbstick click; left X now sends R3.
+- Swaps grip buttons: left grip sends R1 (reload), right grip sends L1. Both-stick recentering and the left-stick 3x movement toggle remain available.
+- Updates the launcher title to v0.8.5.
+- Includes the local frame-interval diagnostics and rate limiting of repeated metadata warnings. These improve crash/performance reports and reduce log spam; no new performance gain is claimed.
+- Retains gamma 1.2, haptics, crash reporting and earlier fixes.
+
+## Retained haptics and gamma fixes
 
 - Restores controller haptics by forwarding game vibration requests to OpenXR. Haptics were confirmed working in local headset testing.
 - Changes tone-mapper gamma from 2.0 to 1.2. Live comparisons confirmed that this control affects headset brightness, and 1.2 was preferred in the tested scene. Existing v0.7.0 profiles regenerate the gamma override on first launch.
@@ -23,7 +32,7 @@ Game-specific configuration and sprint overrides are generated locally from the 
 
 ## First-time installation
 
-1. Download **Farpoint-PC-VR-v0.7.5-First-Install.zip** and extract it to a new writable folder.
+1. Download **Farpoint-PC-VR-v0.8.5-First-Install.zip** and extract it to a new writable folder.
 2. Put your own **Farpoint CUSA04508 version 1.00** package in that root folder, beside **Play Farpoint.bat**, and name it **Farpoint.pkg**. Do not put it inside `pc-vr`.
 3. Connect your headset using your OpenXR runtime, such as SteamVR or Virtual Desktop VDXR.
 4. Open **Play Farpoint.bat**, choose your settings and start. First launch extracts the compatible zero-passcode package, restores metadata and generates resolution profiles. Keep the console open until setup finishes.
@@ -34,7 +43,7 @@ Requires 64-bit Windows, a Vulkan-capable GPU, an OpenXR headset/runtime and the
 
 ## Controls
 
-Right A/B: Cross/Square; left X/Y: Circle/Triangle. Left stick moves; right stick turns. Triggers: L2/R2; grips: L1/R1; left menu: Options. Left stick click toggles 3x sprint. Both stick clicks recenter. The right controller supplies the Aim pose. Complete the game's calibration.
+Right A/B: Cross/Square; left X/Y: R3/Triangle; right thumbstick click: Circle (crouch). Left stick moves; right stick turns. Triggers: L2/R2; left/right grips: R1/L1; left menu: Options. Left stick click toggles 3x sprint. Both stick clicks recenter. The right controller supplies the Aim pose. Complete the game's calibration.
 
 ## Existing installations
 
@@ -46,6 +55,6 @@ After a crash, right-click `pc-vr/collect-crash-report.ps1` and choose **Run wit
 
 ## Validation and known issues
 
-The emulator builds successfully. Launcher syntax, generated memory/gamma and sprint pack parity with the local candidates, and package integrity were checked. The haptics correction and gamma response were confirmed locally. The single-pixel readback change is not yet confirmed to eliminate the texture issues. Green/purple textures, excessive brightness, stretched geometry, performance limitations, and additional crashes may remain. This release remains a prerelease for testing and reports.
+The emulator builds successfully. The FOV slider endpoints, displayed values, launcher syntax and layout bounds were checked. The new control mappings still need in-game confirmation. Launcher syntax, generated memory/gamma and sprint pack parity with the local candidates, and package integrity were checked. The haptics correction and gamma response were confirmed locally. The single-pixel readback change is not yet confirmed to eliminate the texture issues. Green/purple textures, excessive brightness, stretched geometry, performance limitations, and additional crashes may remain. This release remains a prerelease for testing and reports.
 
 Source is on `farpoint-upstream-preview`; see `BUILD.txt` in the download for the exact source and executable identity and `BUILD-FARPOINT.md` in the repository for build instructions.

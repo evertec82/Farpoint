@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <magic_enum/magic_enum.hpp>
 
 #include "common/alignment.h"
@@ -367,7 +368,18 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
             runtime.FillBuffer(arena, arena->Offset(device_addr), size, ZmaskUncompressed);
             return true;
         } else {
-            LOG_WARNING(Render_Vulkan, "Unhandled metadata type {}", magic_enum::enum_name(*type));
+            using Clock = std::chrono::steady_clock;
+            static thread_local auto last_warning = Clock::time_point{};
+            static thread_local u64 suppressed{};
+            const auto now = Clock::now();
+            if (now - last_warning >= std::chrono::seconds{10}) {
+                LOG_WARNING(Render_Vulkan, "Unhandled metadata type {} ({} similar warnings suppressed)",
+                            magic_enum::enum_name(*type), suppressed);
+                last_warning = now;
+                suppressed = 0;
+            } else {
+                ++suppressed;
+            }
         }
     }
     const ImageId image_id = texture_cache.FindImageFromRange(device_addr, size);

@@ -407,6 +407,7 @@ struct OpenXrHost::Impl {
     Clock::time_point last_delivery;
     double longest_gap{};
     u32 long_gaps{};
+    std::array<u32, 201> delivery_intervals{};
 
     // What is being shown.
     bool have_frame{};
@@ -1091,6 +1092,10 @@ struct OpenXrHost::Impl {
             const char* value = std::getenv("SHADPS4_XR_GAMEPAD_LAYOUT");
             return value && std::string_view{value} == "1";
         }();
+        static const bool swap_circle_r3 = [] {
+            const char* value = std::getenv("SHADPS4_XR_SWAP_CIRCLE_R3");
+            return value && std::string_view{value} == "1";
+        }();
 
         XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO};
         bool any_active = false;
@@ -1175,15 +1180,22 @@ struct OpenXrHost::Impl {
         const bool circle = pressed(act_circle);
         const bool triangle = pressed(act_triangle);
         const bool blow = !gamepad_layout && circle && triangle;
-        add(circle && !blow, Buttons::Circle);
+        if (!gamepad_layout || !swap_circle_r3) {
+            add(circle && !blow, Buttons::Circle);
+        }
         add(triangle && !blow, Buttons::Triangle);
         add(pressed(act_options), Buttons::Options);
         const bool left_stick_in = pressed(act_l3);
         const bool right_stick_in = pressed(act_finger_press);
         const float left_grip = std::max(pulled(act_l1), pad_hand == 0 ? 0.0f : test_grip);
         const float right_grip = std::max(pulled(act_r1), pad_hand == 0 ? test_grip : 0.0f);
-        add(left_grip > 0.5f, Buttons::L1);
-        add(right_grip > 0.5f, Buttons::R1);
+        static const bool swap_grips = [] {
+            const char* value = std::getenv("SHADPS4_XR_SWAP_GRIPS");
+            return value && std::string_view{value} == "1";
+        }();
+        const bool swap_pad_grips = gamepad_layout && swap_grips;
+        add(left_grip > 0.5f, swap_pad_grips ? Buttons::R1 : Buttons::L1);
+        add(right_grip > 0.5f, swap_pad_grips ? Buttons::L1 : Buttons::R1);
         const float left_trigger = pulled(act_l2);
         const float right_trigger = pulled(act_r2);
         // Independent Move samples; do not route both hands through the single pad pose.
@@ -1327,7 +1339,12 @@ struct OpenXrHost::Impl {
             left_click_held = left_stick_in;
         }
         add(!view_reset && (toggle_left_click ? left_click_latched : left_stick_in), Buttons::L3);
-        add(right_stick_in && !view_reset, gamepad_layout ? Buttons::R3 : Buttons::TouchPad);
+        if (gamepad_layout && swap_circle_r3) {
+            add(right_stick_in && !view_reset, Buttons::Circle);
+            add(circle && !view_reset, Buttons::R3);
+        } else {
+            add(right_stick_in && !view_reset, gamepad_layout ? Buttons::R3 : Buttons::TouchPad);
+        }
 
         const auto axis = [](float value) {
             return std::clamp(static_cast<int>(std::lround(128.0f + value * 127.0f)), 0, 255);
@@ -2559,10 +2576,13 @@ struct OpenXrHost::Impl {
         const XrVector3f forward = Rotate(head_pose.orientation, {0.0f, 0.0f, -1.0f});
         double gap;
         u32 gaps;
+        std::array<u32, 201> intervals{};
         {
             std::scoped_lock lock{slot_mutex};
             gap = longest_gap;
             gaps = long_gaps;
+            intervals = delivery_intervals;
+            delivery_intervals.fill(0);
             longest_gap = 0.0;
             long_gaps = 0;
         }
@@ -2588,6 +2608,24 @@ struct OpenXrHost::Impl {
                  "({:.2f} ms at worst)",
                  graphics.queue_index, end_lock_time / frames * 1e3,
                  end_call_time / frames * 1e3, end_call_worst * 1e3);
+        u32 interval_count{};
+        for (const u32 count : intervals) interval_count += count;
+        const auto percentile = [&](u32 percentage) {
+            const u32 target = (interval_count * percentage + 99) / 100;
+            u32 accumulated{};
+            for (size_t i = 0; i < intervals.size(); ++i) {
+                accumulated += intervals[i];
+                if (accumulated >= target) return static_cast<u32>(i);
+            }
+            return 200u;
+        };
+        if (interval_count != 0) {
+            LOG_INFO(Core_Vr,
+                     "Frame intervals: {} samples, p50 {}ms, p95 {}ms, p99 {}ms, "
+                     "{} at least 200ms; 1ms bins, ending state {}",
+                     interval_count, percentile(50), percentile(95), percentile(99),
+                     intervals.back(), StateName(state));
+        }
         LOG_INFO(Core_Vr, "Late-frame recovery: {} pictures recovered, {} waits timed out",
                  late_frames, late_wait_timeouts);
         late_frames = 0;
@@ -2965,6 +3003,7 @@ void OpenXrHost::EndFrame(u32 index, const PresentedFrame& info, vk::Semaphore r
     if (impl->last_delivery != Clock::time_point{}) {
         const double gap = std::chrono::duration<double>(now - impl->last_delivery).count();
         impl->longest_gap = std::max(impl->longest_gap, gap);
+        ++impl->delivery_intervals[static_cast<size_t>(std::clamp(gap * 1000.0, 0.0, 200.0))];
         // (Three of a console's frames: a hitch anybody sees.)
         if (gap > 0.050) {
             ++impl->long_gaps;

@@ -3,6 +3,7 @@
     [ValidateSet('Aim','Gamepad')][string]$Controller = 'Aim',
     [ValidateSet(0,30,60)][int]$MirrorFps = 60,
     [ValidateSet(960,1536,1920,2160,2400,2688,3072)][int]$EyeWidth = 1536,
+    [ValidateRange(60,120)][int]$FovPercent = 110,
     [switch]$NoGui,
     [switch]$ValidateOnly
 )
@@ -18,6 +19,7 @@ if (-not $GamePath) {
         if (-not $PSBoundParameters.ContainsKey('Controller') -and $saved.Controller -in @('Aim','Gamepad')) { $Controller = $saved.Controller }
         if (-not $PSBoundParameters.ContainsKey('MirrorFps') -and $saved.MirrorFps -in @(0,30,60)) { $MirrorFps = [int]$saved.MirrorFps }
         if (-not $PSBoundParameters.ContainsKey('EyeWidth') -and $saved.EyeWidth -in @(960,1536,1920,2160,2400,2688,3072)) { $EyeWidth = [int]$saved.EyeWidth }
+        if (-not $PSBoundParameters.ContainsKey('FovPercent') -and $saved.FovPercent -ge 60 -and $saved.FovPercent -le 120) { $FovPercent = [int]$saved.FovPercent }
     }
 }
 if (-not $NoGui -and -not $ValidateOnly) {
@@ -25,8 +27,8 @@ if (-not $NoGui -and -not $ValidateOnly) {
     Add-Type -AssemblyName System.Drawing
     [System.Windows.Forms.Application]::EnableVisualStyles()
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = 'Farpoint PC VR - v0.6.0 prerelease'
-    $form.ClientSize = New-Object System.Drawing.Size(620,365)
+    $form.Text = 'Farpoint PC VR - v0.8.5 prerelease'
+    $form.ClientSize = New-Object System.Drawing.Size(620,465)
     $form.StartPosition = 'CenterScreen'
     $form.FormBorderStyle = 'FixedDialog'
     $form.MaximizeBox = $false
@@ -71,17 +73,29 @@ if (-not $NoGui -and -not $ValidateOnly) {
     [void]$resolution.Items.Add('Original PSVR - 960 x 1080 per eye')
     $resolution.SelectedIndex = [array]::IndexOf(@(3072,2688,2400,2160,1920,1536,960), $EyeWidth)
     $form.Controls.Add($resolution)
+    $fovLabel = New-Object System.Windows.Forms.Label
+    $fovLabel.Text = "Rendered FOV: $FovPercent%"; $fovLabel.SetBounds(18,251,580,20); $form.Controls.Add($fovLabel)
+    $fovSlider = New-Object System.Windows.Forms.TrackBar
+    $fovSlider.Minimum = 60; $fovSlider.Maximum = 120
+    $fovSlider.TickFrequency = 10; $fovSlider.SmallChange = 1; $fovSlider.LargeChange = 10
+    $fovSlider.Value = $FovPercent; $fovSlider.SetBounds(18,274,582,45)
+    $fovSlider.Add_ValueChanged({ $fovLabel.Text = "Rendered FOV: $($fovSlider.Value)%" })
+    $form.Controls.Add($fovSlider)
+    $fovHelp = New-Object System.Windows.Forms.Label
+    $fovHelp.Text = '60% (narrower)                 100% (original)                 120% (wider)'
+    $fovHelp.SetBounds(18,321,580,20); $form.Controls.Add($fovHelp)
     $info = New-Object System.Windows.Forms.Label
     $info.Text = 'Connect the headset through your active OpenXR runtime before starting. Higher resolution uses the game''s stereo scaling. Choose Original for better performance. The mirror setting does not cap headset frames.'
-    $info.SetBounds(18,257,580,45); $form.Controls.Add($info)
+    $info.SetBounds(18,357,580,45); $form.Controls.Add($info)
     $play = New-Object System.Windows.Forms.Button
-    $play.Text = 'Start Farpoint'; $play.SetBounds(455,315,145,32)
+    $play.Text = 'Start Farpoint'; $play.SetBounds(455,415,145,32)
     $play.DialogResult = 'OK'; $form.AcceptButton = $play; $form.Controls.Add($play)
     if ($form.ShowDialog() -ne 'OK') { $form.Dispose(); return }
     $GamePath = $pathBox.Text
     $Controller = if ($controls.SelectedIndex -eq 0) { 'Aim' } else { 'Gamepad' }
     $MirrorFps = @(60,30,0)[$mirror.SelectedIndex]
     $EyeWidth = @(3072,2688,2400,2160,1920,1536,960)[$resolution.SelectedIndex]
+    $FovPercent = $fovSlider.Value
     $form.Dispose()
 }
 if (-not (Test-Path -LiteralPath $exe)) { throw "Missing emulator: $exe" }
@@ -99,7 +113,7 @@ $resolutionProfile = Join-Path $PSScriptRoot ("resolution-profiles/eye-$EyeWidth
 if (-not (Test-Path -LiteralPath $resolutionProfile)) { throw "Missing local resolution profile: $resolutionProfile" }
 $overridePath = Join-Path (Split-Path $GamePath -Parent) 'refuge/content/paks/pakchunk99-PCVR_P.pak'
 if ($ValidateOnly) {
-    [pscustomobject]@{ GamePath=$GamePath; Controller=$Controller; MirrorFps=$MirrorFps; EyeWidth=$EyeWidth; Executable=$exe }
+    [pscustomobject]@{ GamePath=$GamePath; Controller=$Controller; MirrorFps=$MirrorFps; EyeWidth=$EyeWidth; FovPercent=$FovPercent; Executable=$exe }
     return
 }
 if (Get-Process shadps4 -ErrorAction SilentlyContinue) { throw 'Close the running emulator before starting Farpoint.' }
@@ -124,12 +138,14 @@ foreach ($name in @('connected_to_network', 'shad_net_enabled')) {
     if ($config.General.PSObject.Properties[$name]) { $config.General.$name = $false }
 }
 $config | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $configPath -Encoding UTF8
-@{ GamePath=$GamePath; Controller=$Controller; MirrorFps=$MirrorFps; EyeWidth=$EyeWidth } | ConvertTo-Json | Set-Content -LiteralPath $settingsFile -Encoding UTF8
+@{ GamePath=$GamePath; Controller=$Controller; MirrorFps=$MirrorFps; EyeWidth=$EyeWidth; FovPercent=$FovPercent } | ConvertTo-Json | Set-Content -LiteralPath $settingsFile -Encoding UTF8
 $env:SHADPS4_OPENXR = '1'; $env:SHADPS4_VR = '1'
 # Extra render margin during head movement; set 100 to restore the original FOV.
-$env:SHADPS4_VR_FOV = '110'
+$env:SHADPS4_VR_FOV = [string]$FovPercent
 $env:SHADPS4_XR_WAIT = '0'; $env:SHADPS4_XR_PAUSE = '0'
 $env:SHADPS4_XR_GAMEPAD_LAYOUT = '1'
+$env:SHADPS4_XR_SWAP_CIRCLE_R3 = '1'
+$env:SHADPS4_XR_SWAP_GRIPS = '1'
 $env:SHADPS4_XR_PAD_HAND = 'right'
 $env:SHADPS4_XR_TOGGLE_L3 = '1'
 $env:SHADPS4_GPU_WAIT_TIMING = '1'
@@ -152,7 +168,7 @@ $priorLog = Join-Path $logRoot 'shad_log.txt'
 if (Test-Path -LiteralPath $priorLog) {
     Copy-Item -LiteralPath $priorLog -Destination (Join-Path $logRoot "previous-$stamp.txt")
 }
-@{ Started=(Get-Date).ToString('o'); Executable=$exe; SHA256=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash; GameSHA256=$expectedHash; EyeWidth=$EyeWidth; MirrorFps=$MirrorFps; Controller=$Controller } | ConvertTo-Json | Set-Content (Join-Path $logRoot "session-$stamp.json") -Encoding UTF8
+@{ Started=(Get-Date).ToString('o'); Executable=$exe; SHA256=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash; GameSHA256=$expectedHash; EyeWidth=$EyeWidth; FovPercent=$FovPercent; MirrorFps=$MirrorFps; Controller=$Controller } | ConvertTo-Json | Set-Content (Join-Path $logRoot "session-$stamp.json") -Encoding UTF8
 $stdoutPath = Join-Path $logRoot "console-$stamp.stdout.txt"
 $stderrPath = Join-Path $logRoot "console-$stamp.stderr.txt"
 $process = Start-Process -FilePath $exe -WorkingDirectory $PSScriptRoot -ArgumentList @('-g',('"' + $GamePath + '"')) -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
