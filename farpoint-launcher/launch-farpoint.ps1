@@ -126,6 +126,8 @@ foreach ($name in @('connected_to_network', 'shad_net_enabled')) {
 $config | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $configPath -Encoding UTF8
 @{ GamePath=$GamePath; Controller=$Controller; MirrorFps=$MirrorFps; EyeWidth=$EyeWidth } | ConvertTo-Json | Set-Content -LiteralPath $settingsFile -Encoding UTF8
 $env:SHADPS4_OPENXR = '1'; $env:SHADPS4_VR = '1'
+# Extra render margin during head movement; set 100 to restore the original FOV.
+$env:SHADPS4_VR_FOV = '110'
 $env:SHADPS4_XR_WAIT = '0'; $env:SHADPS4_XR_PAUSE = '0'
 $env:SHADPS4_XR_GAMEPAD_LAYOUT = '1'
 $env:SHADPS4_XR_PAD_HAND = 'right'
