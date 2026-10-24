@@ -5,6 +5,7 @@
 
 #include <boost/container/static_vector.hpp>
 #include <xxhash.h>
+#include "common/compile_worker.h"
 
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "video_core/amdgpu/regs_color.h"
@@ -90,7 +91,7 @@ public:
                      std::span<const Shader::RuntimeInfo, MaxShaderStages> runtime_infos,
                      const Shader::Gcn::FetchShaderData* fetch_shader,
                      std::span<const vk::ShaderModule> modules, SerializationSupport& sdata,
-                     bool preloading);
+                     bool preloading, Common::CompileWorker* compiler = nullptr);
     ~GraphicsPipeline();
 
     const Shader::Gcn::FetchShaderData& GetFetchShader() const noexcept {
@@ -110,6 +111,8 @@ public:
 
 private:
     void BuildDescSetLayout(bool preloading);
+    vk::UniquePipeline Compile(vk::PipelineCache cache, SerializationSupport sdata,
+                               std::array<vk::ShaderModule, MaxShaderStages> modules) const;
 
 private:
     GraphicsPipelineKey key;

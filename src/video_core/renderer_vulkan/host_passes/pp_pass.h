@@ -32,9 +32,13 @@ public:
         std::array<float, 4> overlay_uv{1, 1, 0, 0};
         u32 has_overlay = 0;
         u32 srgb_input = 0;
+        float gamma_cutoff = 0.0031308f;
+        float gamma_slope = 12.92f;
+        float gamma_exponent = 1.0f / 2.4f;
+        float dither_quantum = 0.0f;
     };
 
-    static_assert(sizeof(Settings) == 56); // Matches the fragment shader push constants.
+    static_assert(sizeof(Settings) == 72); // Matches the fragment shader push constants.
 
     void Create(const Instance& instance, Semaphore* master_semaphore,
                 vk::Format surface_format);
@@ -72,6 +76,7 @@ public:
 
 private:
     vk::Device device{};
+    float dither_quantum{};
     bool uses_push_descriptors{};
     // Pool sizes must outlive desc_heap (DescriptorHeap stores a span to it).
     static constexpr std::array<vk::DescriptorPoolSize, 1> pool_sizes{{

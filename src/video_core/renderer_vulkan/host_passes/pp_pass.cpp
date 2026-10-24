@@ -13,12 +13,33 @@
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
 #include <boost/container/static_vector.hpp>
+#include <cmath>
+#include <cstdlib>
 
 namespace Vulkan::HostPasses {
 
 void PostProcessingPass::Create(const Instance& instance, Semaphore* master_semaphore,
                                 const vk::Format surface_format) {
     device = instance.GetDevice();
+    switch (surface_format) {
+    case vk::Format::eR8G8B8A8Unorm:
+    case vk::Format::eR8G8B8A8Srgb:
+    case vk::Format::eB8G8R8A8Unorm:
+    case vk::Format::eB8G8R8A8Srgb:
+        dither_quantum = 1.0f / 255.0f;
+        break;
+    case vk::Format::eA2R10G10B10UnormPack32:
+    case vk::Format::eA2B10G10R10UnormPack32:
+        dither_quantum = 1.0f / 1023.0f;
+        break;
+    default:
+        dither_quantum = 0.0f;
+        break;
+    }
+    if (const char* value = std::getenv("SHADPS4_OUTPUT_DITHER"); value && *value == '0') {
+        dither_quantum = 0.0f;
+    }
+    LOG_INFO(Render_Vulkan, "Output format {} dither quantum {}", vk::to_string(surface_format), dither_quantum);
     uses_push_descriptors = true;
     desc_heap = std::make_unique<DescriptorHeap>(instance, master_semaphore, pool_sizes, 64);
     static const std::array pp_shaders{
@@ -238,6 +259,17 @@ void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, std::span<const Region
         .pColorAttachments = attachments.data(),
     };
 
+    const float exponent = 3.4f - std::clamp(settings.gamma, 0.1f, 2.0f);
+    settings.gamma_exponent = 1.0f / exponent;
+    if (settings.gamma == 1.0f) {
+        settings.gamma_cutoff = 0.0031308f;
+        settings.gamma_slope = 12.92f;
+    } else {
+        settings.gamma_cutoff = std::pow(0.055f / (1.055f * (1.0f - 1.0f / exponent)), exponent);
+        settings.gamma_slope = (1.055f / exponent) *
+                              std::pow(settings.gamma_cutoff, 1.0f / exponent - 1.0f);
+    }
+    settings.dither_quantum = dither_quantum;
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, *pipeline);
     cmdbuf.pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(Settings),
                          &settings);

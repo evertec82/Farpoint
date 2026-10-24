@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <utility>
 #include <boost/container/small_vector.hpp>
 
@@ -33,7 +34,7 @@ GraphicsPipeline::GraphicsPipeline(
     vk::PipelineCache pipeline_cache, std::span<const Shader::Info*, MaxShaderStages> infos,
     std::span<const Shader::RuntimeInfo, MaxShaderStages> runtime_infos,
     const Shader::Gcn::FetchShaderData* fetch_shader_, std::span<const vk::ShaderModule> modules,
-    SerializationSupport& sdata, bool preloading)
+    SerializationSupport& sdata, bool preloading, Common::CompileWorker* compiler)
     : Pipeline{instance, scheduler, desc_heap, profile, pipeline_cache}, key{key_} {
     if (fetch_shader_) {
         fetch_shader = *fetch_shader_;
@@ -72,6 +73,61 @@ GraphicsPipeline::GraphicsPipeline(
         }
     }
 
+    if (!preloading) {
+        const auto& fs_info = runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs;
+        sdata.multisampling = {
+            .rasterizationSamples = LiverpoolToVK::NumSamples(
+                key.num_samples, instance.GetColorSampleCounts() & instance.GetDepthSampleCounts()),
+            .sampleShadingEnable =
+                fs_info.addr_flags.persp_sample_ena || fs_info.addr_flags.linear_sample_ena,
+        };
+    }
+    const bool rect = key.prim_type == AmdGpu::PrimitiveType::RectList;
+    const bool quad = key.prim_type == AmdGpu::PrimitiveType::QuadList;
+    if (rect || quad) {
+        const auto type = quad ? AuxShaderType::QuadListTCS : AuxShaderType::RectListTCS;
+        if (!preloading && !infos[u32(Shader::SwStage::TessellationControl)]) {
+            const auto& fs_info = runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs;
+            sdata.tcs = Shader::Backend::SPIRV::EmitAuxilaryTessShader(type, fs_info);
+        }
+        if (!preloading && !infos[u32(Shader::SwStage::TessellationEval)]) {
+            const auto& fs_info = runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs;
+            sdata.tes = Shader::Backend::SPIRV::EmitAuxilaryTessShader(
+                AuxShaderType::PassthroughTES, fs_info);
+        }
+    }
+    if (!infos[u32(Shader::SwStage::Fragment)] &&
+        runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs.clip_distance_emulation) {
+        if (!preloading) {
+            const auto& vs = runtime_infos[static_cast<u32>(Shader::SwStage::Vertex)].hw.vs;
+
+            sdata.fragment = Shader::Backend::SPIRV::EmitDiscardFragmentShader(vs.outputs);
+        }
+    }
+    std::array<vk::ShaderModule, MaxShaderStages> owned_modules{};
+    for (size_t i = 0; i < owned_modules.size(); ++i) {
+        if (infos[i]) {
+            owned_modules[i] = modules[i];
+        }
+    }
+    sdata.multisampling.pNext = nullptr;
+    sdata.multisampling.pSampleMask = nullptr;
+    if (compiler) {
+        compilation = compiler->Submit([this, pipeline_cache, snapshot = sdata,
+                                       owned_modules]() mutable {
+            return Compile(pipeline_cache, std::move(snapshot), owned_modules);
+        });
+    } else {
+        pipeline = Compile(pipeline_cache, sdata, owned_modules);
+    }
+}
+
+vk::UniquePipeline GraphicsPipeline::Compile(
+    vk::PipelineCache pipeline_cache, SerializationSupport sdata,
+    std::array<vk::ShaderModule, MaxShaderStages> modules) const {
+    const auto start = std::chrono::steady_clock::now();
+    const auto device = instance.GetDevice();
+    const auto debug_str = fmt::format("{:#x}", std::hash<GraphicsPipelineKey>{}(key));
     const vk::PipelineVertexInputDivisorStateCreateInfo divisor_state = {
         .vertexBindingDivisorCount = static_cast<u32>(sdata.divisors.size()),
         .pVertexBindingDivisors = sdata.divisors.data(),
@@ -121,15 +177,6 @@ GraphicsPipeline::GraphicsPipeline(
         raster_chain.unlink<vk::PipelineRasterizationDepthClipStateCreateInfoEXT>();
     }
 
-    if (!preloading) {
-        const auto& fs_info = runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs;
-        sdata.multisampling = {
-            .rasterizationSamples = LiverpoolToVK::NumSamples(
-                key.num_samples, instance.GetColorSampleCounts() & instance.GetDepthSampleCounts()),
-            .sampleShadingEnable =
-                fs_info.addr_flags.persp_sample_ena || fs_info.addr_flags.linear_sample_ena,
-        };
-    }
 
     const vk::PipelineViewportDepthClipControlCreateInfoEXT clip_control = {
         .negativeOneToOne = key.clip_space == AmdGpu::ClipSpace::MinusWToW,
@@ -172,7 +219,7 @@ GraphicsPipeline::GraphicsPipeline(
     boost::container::static_vector<vk::PipelineShaderStageCreateInfo, MaxShaderStages>
         shader_stages;
     auto stage = u32(Shader::SwStage::Vertex);
-    if (infos[stage]) {
+    if (modules[stage]) {
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eVertex,
             .module = modules[stage],
@@ -180,7 +227,7 @@ GraphicsPipeline::GraphicsPipeline(
         });
     }
     stage = u32(Shader::SwStage::Geometry);
-    if (infos[stage]) {
+    if (modules[stage]) {
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eGeometry,
             .module = modules[stage],
@@ -188,18 +235,14 @@ GraphicsPipeline::GraphicsPipeline(
         });
     }
     stage = u32(Shader::SwStage::TessellationControl);
-    if (infos[stage]) {
+    if (modules[stage]) {
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationControl,
             .module = modules[stage],
             .pName = "main",
         });
     } else if (is_rect_list || is_quad_list) {
-        const auto type = is_quad_list ? AuxShaderType::QuadListTCS : AuxShaderType::RectListTCS;
-        if (!preloading) {
-            const auto& fs_info = runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs;
-            sdata.tcs = Shader::Backend::SPIRV::EmitAuxilaryTessShader(type, fs_info);
-        }
+
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationControl,
             .module = CompileSPV(sdata.tcs, instance.GetDevice()),
@@ -207,18 +250,14 @@ GraphicsPipeline::GraphicsPipeline(
         });
     }
     stage = u32(Shader::SwStage::TessellationEval);
-    if (infos[stage]) {
+    if (modules[stage]) {
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationEvaluation,
             .module = modules[stage],
             .pName = "main",
         });
     } else if (is_rect_list || is_quad_list) {
-        if (!preloading) {
-            const auto& fs_info = runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs;
-            sdata.tes = Shader::Backend::SPIRV::EmitAuxilaryTessShader(
-                AuxShaderType::PassthroughTES, fs_info);
-        }
+
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationEvaluation,
             .module = CompileSPV(sdata.tes, instance.GetDevice()),
@@ -226,18 +265,14 @@ GraphicsPipeline::GraphicsPipeline(
         });
     }
     stage = u32(Shader::SwStage::Fragment);
-    if (infos[stage]) {
+    if (modules[stage]) {
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eFragment,
             .module = modules[stage],
             .pName = "main",
         });
-    } else if (runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs.clip_distance_emulation) {
-        if (!preloading) {
-            const auto& vs = runtime_infos[static_cast<u32>(Shader::SwStage::Vertex)].hw.vs;
+    } else if (!sdata.fragment.empty()) {
 
-            sdata.fragment = Shader::Backend::SPIRV::EmitDiscardFragmentShader(vs.outputs);
-        }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eFragment,
             .module = CompileSPV(sdata.fragment, instance.GetDevice()),
@@ -271,7 +306,7 @@ GraphicsPipeline::GraphicsPipeline(
     }
 
     std::array<vk::SampleCountFlagBits, AmdGpu::NUM_COLOR_BUFFERS> color_samples;
-    std::ranges::transform(key.color_samples, color_samples.begin(), [&instance](u8 num_samples) {
+    std::ranges::transform(key.color_samples, color_samples.begin(), [this](u8 num_samples) {
         return num_samples ? LiverpoolToVK::NumSamples(num_samples, instance.GetColorSampleCounts())
                            : vk::SampleCountFlagBits::e1;
     });
@@ -418,11 +453,15 @@ GraphicsPipeline::GraphicsPipeline(
         device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
     ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create graphics pipeline: {}",
                vk::to_string(pipeline_result));
-    pipeline = std::move(pipe);
-    SetObjectName(device, *pipeline, "Graphics Pipeline {}", debug_str);
+    SetObjectName(device, *pipe, "Graphics Pipeline {}", debug_str);
+    LOG_INFO(Render_Vulkan, "Graphics pipeline {} driver compile {:.3f} ms", debug_str,
+             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-start).count());
+    return std::move(pipe);
 }
 
-GraphicsPipeline::~GraphicsPipeline() = default;
+GraphicsPipeline::~GraphicsPipeline() {
+    if (compilation.valid()) compilation.wait();
+}
 
 template <typename Attribute, typename Binding>
 void GraphicsPipeline::GetVertexInputs(

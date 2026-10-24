@@ -1,8 +1,18 @@
-# Farpoint PC VR v0.8.5
+# Farpoint PC VR v0.9.0
 
 This experimental PC VR release uses shadPS4 baseline `06e813ff8c8e2a6d81b02cabfcc9543c3debf78e` with the Farpoint OpenXR port.
 
-## Changes in v0.8.5
+## Changes in v0.9.0
+
+- Asynchronous Vulkan graphics pipeline compilation overlaps texture and buffer preparation. Draws wait for unfinished pipelines rather than skipping objects or effects. GCN translation and compute pipelines remain synchronous, so first-use stalls can remain.
+- Adds output-format-aware dithering to reduce banding introduced during final output quantization. Exact black and white are preserved; dithering cannot restore detail already lost earlier in rendering.
+- Fixes the discontinuity in the host gamma curve at non-default values. The separate game-side gamma remains at the previously selected 1.2. Scene-wide excessive brightness is not confirmed fixed.
+- Defaults the desktop mirror to 30 FPS to reduce extra rendering work without capping the headset. Existing saved mirror settings take precedence.
+- A short local headset test reported improved performance. Longer-session stability and visual results still need more testing; no measured FPS increase is claimed.
+
+For comparison, set `SHADPS4_ASYNC_PIPELINES=0` before launching to disable background compilation, or `SHADPS4_OUTPUT_DITHER=0` to disable output dithering. Restart after changing either variable. Logs record driver compilation time and the remaining wait before a draw.
+
+## Retained changes from v0.8.5
 
 - Adds a saved rendered-FOV slider from 60% to 120%, defaulting to 110%. Select 100% for the original FOV. Changes apply when starting the game; wider values give more edge margin at the cost of sharpness at a fixed resolution.
 - Moves crouch (Circle) to right thumbstick click; left X now sends R3.
@@ -32,7 +42,7 @@ Game-specific configuration and sprint overrides are generated locally from the 
 
 ## First-time installation
 
-1. Download **Farpoint-PC-VR-v0.8.5-First-Install.zip** and extract it to a new writable folder.
+1. Download **Farpoint-PC-VR-v0.9.0-First-Install.zip** and extract it to a new writable folder.
 2. Put your own **Farpoint CUSA04508 version 1.00** package in that root folder, beside **Play Farpoint.bat**, and name it **Farpoint.pkg**. Do not put it inside `pc-vr`.
 3. Connect your headset using your OpenXR runtime, such as SteamVR or Virtual Desktop VDXR.
 4. Open **Play Farpoint.bat**, choose your settings and start. First launch extracts the compatible zero-passcode package, restores metadata and generates resolution profiles. Keep the console open until setup finishes.

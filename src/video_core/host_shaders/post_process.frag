@@ -21,14 +21,18 @@ layout (push_constant) uniform settings {
     vec4 overlay_uv;
     bool has_overlay;
     bool srgb_input;
+    float gamma_cutoff;
+    float gamma_slope;
+    float gamma_exponent;
+    float dither_quantum;
 } pp;
 
 const float cutoff = 0.0031308, a = 1.055, b = 0.055, d = 12.92;
 vec3 gamma(vec3 rgb) {
     return mix(
-        a * pow(rgb, vec3(1.0 / (2.4 + 1.0 - pp.gamma))) - b,
-        d * rgb / pp.gamma,
-        lessThan(rgb, vec3(cutoff))
+        a * pow(max(rgb, vec3(0.0)), vec3(pp.gamma_exponent)) - b,
+        pp.gamma_slope * max(rgb, vec3(0.0)),
+        lessThan(rgb, vec3(pp.gamma_cutoff))
     );
 }
 
@@ -77,6 +81,12 @@ void main() {
         vec3 weight = room * (-1.0 / mix(8.0, 5.0, clamp(pp.sharpen, 0.0, 1.0)));
         here = clamp(((above + below + left + right) * weight + here) / (1.0 + 4.0 * weight),
                      0.0, 1.0);
+    }
+    if (!pp.hdr && pp.dither_quantum > 0.0) {
+        float noise = fract(52.9829189 * fract(dot(floor(gl_FragCoord.xy),
+                                                vec2(0.06711056, 0.00583715)))) - 0.5;
+        vec3 room = clamp(min(here, 1.0 - here) / pp.dither_quantum, 0.0, 1.0);
+        here = clamp(here + room * noise * pp.dither_quantum, 0.0, 1.0);
     }
     if (pp.linear_out && !pp.hdr) {
         // Back to linear light, by the curve the target encodes with.

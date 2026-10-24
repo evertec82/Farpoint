@@ -1,7 +1,7 @@
 ﻿param(
     [string]$GamePath,
     [ValidateSet('Aim','Gamepad')][string]$Controller = 'Aim',
-    [ValidateSet(0,30,60)][int]$MirrorFps = 60,
+    [ValidateSet(0,30,60)][int]$MirrorFps = 30,
     [ValidateSet(960,1536,1920,2160,2400,2688,3072)][int]$EyeWidth = 1536,
     [ValidateRange(60,120)][int]$FovPercent = 110,
     [switch]$NoGui,
@@ -27,7 +27,7 @@ if (-not $NoGui -and -not $ValidateOnly) {
     Add-Type -AssemblyName System.Drawing
     [System.Windows.Forms.Application]::EnableVisualStyles()
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = 'Farpoint PC VR - v0.8.5 prerelease'
+    $form.Text = 'Farpoint PC VR - v0.9.0 prerelease'
     $form.ClientSize = New-Object System.Drawing.Size(620,465)
     $form.StartPosition = 'CenterScreen'
     $form.FormBorderStyle = 'FixedDialog'
