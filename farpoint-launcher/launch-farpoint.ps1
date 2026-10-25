@@ -2,7 +2,7 @@
     [string]$GamePath,
     [ValidateSet('Aim','Gamepad')][string]$Controller = 'Aim',
     [ValidateSet(0,30,60)][int]$MirrorFps = 30,
-    [ValidateSet(960,1536,1920,2160,2400,2688,3072)][int]$EyeWidth = 1536,
+    [ValidateSet(960,1536,1920,2160,2400,2688,3072,3456,3840)][int]$EyeWidth = 1536,
     [ValidateRange(60,120)][int]$FovPercent = 110,
     [switch]$NoGui,
     [switch]$ValidateOnly
@@ -18,7 +18,7 @@ if (-not $GamePath) {
         if ($saved.GamePath) { $GamePath = $saved.GamePath }
         if (-not $PSBoundParameters.ContainsKey('Controller') -and $saved.Controller -in @('Aim','Gamepad')) { $Controller = $saved.Controller }
         if (-not $PSBoundParameters.ContainsKey('MirrorFps') -and $saved.MirrorFps -in @(0,30,60)) { $MirrorFps = [int]$saved.MirrorFps }
-        if (-not $PSBoundParameters.ContainsKey('EyeWidth') -and $saved.EyeWidth -in @(960,1536,1920,2160,2400,2688,3072)) { $EyeWidth = [int]$saved.EyeWidth }
+        if (-not $PSBoundParameters.ContainsKey('EyeWidth') -and $saved.EyeWidth -in @(960,1536,1920,2160,2400,2688,3072,3456,3840)) { $EyeWidth = [int]$saved.EyeWidth }
         if (-not $PSBoundParameters.ContainsKey('FovPercent') -and $saved.FovPercent -ge 60 -and $saved.FovPercent -le 120) { $FovPercent = [int]$saved.FovPercent }
     }
 }
@@ -27,7 +27,7 @@ if (-not $NoGui -and -not $ValidateOnly) {
     Add-Type -AssemblyName System.Drawing
     [System.Windows.Forms.Application]::EnableVisualStyles()
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = 'Farpoint PC VR - v0.9.0 prerelease'
+    $form.Text = 'Farpoint PC VR - v0.9.5 prerelease'
     $form.ClientSize = New-Object System.Drawing.Size(620,465)
     $form.StartPosition = 'CenterScreen'
     $form.FormBorderStyle = 'FixedDialog'
@@ -64,14 +64,16 @@ if (-not $NoGui -and -not $ValidateOnly) {
     $resolutionLabel.Text = 'Headset resolution per eye'; $resolutionLabel.SetBounds(18,187,560,20); $form.Controls.Add($resolutionLabel)
     $resolution = New-Object System.Windows.Forms.ComboBox
     $resolution.DropDownStyle = 'DropDownList'; $resolution.SetBounds(18,211,582,25)
-    [void]$resolution.Items.Add('3072 x 3456 per eye - 10.24x pixels (highest)')
+    [void]$resolution.Items.Add('3840 x 4320 per eye - 16x pixels (highest)')
+    [void]$resolution.Items.Add('3456 x 3888 per eye - 12.96x pixels')
+    [void]$resolution.Items.Add('3072 x 3456 per eye - 10.24x pixels')
     [void]$resolution.Items.Add('2688 x 3024 per eye - 7.84x pixels')
     [void]$resolution.Items.Add('2400 x 2700 per eye - 6.25x pixels')
     [void]$resolution.Items.Add('2160 x 2430 per eye - 5.06x pixels')
     [void]$resolution.Items.Add('1920 x 2160 per eye - 4x pixels')
     [void]$resolution.Items.Add('1536 x 1728 per eye - 2.56x pixels')
     [void]$resolution.Items.Add('Original PSVR - 960 x 1080 per eye')
-    $resolution.SelectedIndex = [array]::IndexOf(@(3072,2688,2400,2160,1920,1536,960), $EyeWidth)
+    $resolution.SelectedIndex = [array]::IndexOf(@(3840,3456,3072,2688,2400,2160,1920,1536,960), $EyeWidth)
     $form.Controls.Add($resolution)
     $fovLabel = New-Object System.Windows.Forms.Label
     $fovLabel.Text = "Rendered FOV: $FovPercent%"; $fovLabel.SetBounds(18,251,580,20); $form.Controls.Add($fovLabel)
@@ -94,7 +96,7 @@ if (-not $NoGui -and -not $ValidateOnly) {
     $GamePath = $pathBox.Text
     $Controller = if ($controls.SelectedIndex -eq 0) { 'Aim' } else { 'Gamepad' }
     $MirrorFps = @(60,30,0)[$mirror.SelectedIndex]
-    $EyeWidth = @(3072,2688,2400,2160,1920,1536,960)[$resolution.SelectedIndex]
+    $EyeWidth = @(3840,3456,3072,2688,2400,2160,1920,1536,960)[$resolution.SelectedIndex]
     $FovPercent = $fovSlider.Value
     $form.Dispose()
 }
@@ -124,7 +126,7 @@ $config = Get-Content $configPath -Raw | ConvertFrom-Json
 $config.General | Add-Member -NotePropertyName redzone_patches -NotePropertyValue $true -Force
 # Supersampled stereo targets exceed the original console direct-memory budget.
 # Keep a larger existing allowance if the user has configured one.
-$requiredExtraMemoryMb = if ($EyeWidth -ge 3072) { 6144 } elseif ($EyeWidth -ge 2160) { 4096 } elseif ($EyeWidth -ge 1536) { 2048 } else { 0 }
+$requiredExtraMemoryMb = if ($EyeWidth -ge 3456) { 8192 } elseif ($EyeWidth -ge 3072) { 6144 } elseif ($EyeWidth -ge 2160) { 4096 } elseif ($EyeWidth -ge 1536) { 2048 } else { 0 }
 $config.General.extra_dmem_in_mbytes = [Math]::Max([int]$config.General.extra_dmem_in_mbytes, $requiredExtraMemoryMb)
 $config.Input.use_special_pad = $Controller -eq 'Aim'
 $config.Input.special_pad_class = 9
@@ -149,6 +151,7 @@ $env:SHADPS4_XR_SWAP_GRIPS = '1'
 $env:SHADPS4_XR_PAD_HAND = 'right'
 $env:SHADPS4_XR_TOGGLE_L3 = '1'
 $env:SHADPS4_GPU_WAIT_TIMING = '1'
+if (-not $env:SHADPS4_SUBMIT_BATCH_SIZE) { $env:SHADPS4_SUBMIT_BATCH_SIZE = '32' }
 $env:SHADPS4_ALLOCATION_TRACE = '1'
 $env:SHADPS4_TEXTURE_SOURCE_CAPTURE = $null
 $env:SHADPS4_XR_PAD_PITCH = '-20'

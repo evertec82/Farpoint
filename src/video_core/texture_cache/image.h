@@ -153,6 +153,7 @@ public:
         UniqueImage image;
         State state;
         std::vector<State> subresource_states;
+        std::optional<SubresourceRange> last_shader_read_range;
         SmallVector<ImageViewInfo, 2> image_view_infos;
         SmallVector<ImageViewId, 2> image_view_ids;
         u32 num_samples;

@@ -236,7 +236,7 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
 
     it.value() = std::make_unique<GraphicsPipeline>(
         instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
-        runtime_infos, fetch_shader, modules, sdata, true);
+        runtime_infos, fetch_shader, modules, sdata, true, compiler.get());
 
     infos.fill(nullptr);
     modules.fill(nullptr);
@@ -368,6 +368,12 @@ void PipelineCache::WarmUp() {
             }
         });
 
+    if (compiler) {
+        compiler->WaitIdle();
+    }
+    for (const auto& [key, pipeline] : graphics_pipelines) {
+        (void)pipeline->Handle();
+    }
     LOG_INFO(Render, "Preloaded {} pipelines", num_pipelines);
     if (num_total_pipelines > num_pipelines) {
         LOG_WARNING(Render, "{} stale pipelines were found. Consider re-generating the cache",

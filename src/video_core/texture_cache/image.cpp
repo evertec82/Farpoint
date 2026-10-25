@@ -229,6 +229,14 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
         subres_range &&
         (subres_range->base != SubresourceBase{} || subres_range->extent != info.resources);
     const bool partially_transited = !subresource_states.empty();
+    const bool cache_shader_read =
+        needs_partial_transition && dst_mask == vk::AccessFlagBits2::eShaderRead;
+    if (cache_shader_read && backing->last_shader_read_range == subres_range &&
+        last_state.layout == dst_layout && last_state.access_mask == dst_mask &&
+        last_state.pl_stage == dst_stage) {
+        return;
+    }
+    backing->last_shader_read_range.reset();
 
     if (needs_partial_transition || partially_transited) {
         if (!partially_transited) {
@@ -319,6 +327,9 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
     last_state.layout = dst_layout;
     last_state.access_mask = dst_mask;
     last_state.pl_stage = dst_stage;
+    if (cache_shader_read) {
+        backing->last_shader_read_range = subres_range;
+    }
 }
 
 } // namespace VideoCore

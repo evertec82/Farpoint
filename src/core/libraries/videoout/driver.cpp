@@ -562,9 +562,13 @@ public:
     bool IsRefresh(Clock::time_point now, u32 halves) {
         halves = std::max(halves, 1u);
         const auto display = Core::Vr::Runtime::Instance().GetDisplayRefresh();
+        const auto display_period =
+            display.rate > 30.0f
+                ? std::chrono::nanoseconds{static_cast<s64>(1e9 / display.rate)}
+                : period;
         // A host that misses a few refreshes of its display is still followed: the display
         // went on refreshing. One that says nothing for longer has stopped showing pictures.
-        if (display.sequence == 0 || now - display.time > Silence * period) {
+        if (display.sequence == 0 || now - display.time > Silence * std::max(period, display_period)) {
             if (following) {
                 following = false;
                 look = 0;
@@ -577,10 +581,7 @@ public:
             look = 0;
             return true;
         }
-        const auto display_period =
-            display.rate > 30.0f
-                ? std::chrono::nanoseconds{static_cast<s64>(1e9 / display.rate)}
-                : period;
+        host_period = display_period;
         if (!following) {
             following = true;
             last_refresh = now;
@@ -588,7 +589,6 @@ public:
                                    "{:.1f} times a second", display.rate);
             return true;
         }
-        host_period = display_period;
         delay = std::clamp(delay, std::chrono::nanoseconds{0}, host_period);
         // The refreshes of the display and the moments half-way between them, those the host
         // did not tell of included, shifted by the delay that has come round: the headset

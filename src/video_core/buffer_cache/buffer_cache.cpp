@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/slow_operation.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <magic_enum/magic_enum.hpp>
 
 #include "common/alignment.h"
@@ -103,6 +105,7 @@ void BufferCache::TickFrame() {
 }
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
+    const Common::SlowOperation timing{"BufferCache::InvalidateMemory"};
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
         ReadMemory(device_addr, size, true, assume_locks);
     });
@@ -156,15 +159,23 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
         gpu_modified_ranges.Subtract(address, size);
     });
     if (total_size_bytes == 0) {
+        memory_tracker->UnmarkRegionAsGpuModified(device_addr, size, false);
         return;
     }
     const auto download = staging_pool.Request(total_size_bytes, VideoCore::MemoryType::HostCached);
     for (auto& copy : copies) {
         copy.dstOffset += download.offset;
     }
+    static const bool timing = std::getenv("SHADPS4_GPU_WAIT_TIMING") != nullptr;
+    const auto start = timing ? std::chrono::steady_clock::now()
+                              : std::chrono::steady_clock::time_point{};
     runtime.CopyBuffer(arena, download.buffer, copies);
-    scheduler.Finish();
+    {
+        const Common::SlowOperation timing{"BufferCache::DownloadGpuWait"};
+        scheduler.Finish();
+    }
 
+    const Common::SlowOperation copy_timing{"BufferCache::DownloadWriteback"};
     download.buffer->Invalidate(download.offset, download.size);
     for (const auto& copy : copies) {
         auto* dst_addr = std::bit_cast<u8*>(arena_base + copy.srcOffset);
@@ -172,6 +183,28 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
                                 copy.size);
     }
     memory_tracker->UnmarkRegionAsGpuModified(device_addr, size, false);
+    if (timing) {
+        const auto end = std::chrono::steady_clock::now();
+        static auto report_start = start;
+        static u64 calls = 0, bytes = 0, ranges = 0, largest = 0;
+        static double total_ms = 0.0, max_ms = 0.0;
+        const double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
+        ++calls;
+        bytes += total_size_bytes;
+        ranges += copies.size();
+        largest = std::max(largest, total_size_bytes);
+        total_ms += elapsed;
+        max_ms = std::max(max_ms, elapsed);
+        if (end - report_start >= std::chrono::seconds{10}) {
+            LOG_INFO(Render_Vulkan,
+                     "Buffer readbacks: {} calls, {} bytes, {} copy ranges, {} largest bytes, "
+                     "{:.2f}ms total, {:.2f}ms max",
+                     calls, bytes, ranges, largest, total_ms, max_ms);
+            report_start = end;
+            calls = bytes = ranges = largest = 0;
+            total_ms = max_ms = 0.0;
+        }
+    }
 }
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
@@ -278,6 +311,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
 }
 
 void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_block) {
+    const Common::SlowOperation timing{"BufferCache::EnsureResident"};
     u32 resident_blocks{};
     IntervalList bind_ranges;
     resident_ranges.ForEachGap(first_block, last_block + 1, [&](u64 start, u64 end) {
@@ -315,7 +349,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         backing.offset = memory_offset >> block_shift;
         resident_ranges.Add(backing);
 
-        LOG_INFO(Render, "Making range start={}, end={} resident", backing.start, backing.end);
+        LOG_DEBUG(Render, "Making range start={}, end={} resident", backing.start, backing.end);
 
         const auto& bind = binds->binds.emplace_back(vk::SparseMemoryBind{
             .resourceOffset = (range.start << block_shift) - arena->cpu_addr,
@@ -423,6 +457,7 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
 }
 
 void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
+    const Common::SlowOperation timing{"BufferCache::SubmitPendingArenaBinds"};
     if (pending_binds.empty()) {
         return;
     }

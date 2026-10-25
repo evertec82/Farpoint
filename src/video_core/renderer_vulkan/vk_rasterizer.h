@@ -175,6 +175,8 @@ private:
 
     bool attachment_feedback_loop{};
     bool needs_barrier{};
+    u64 draw_batch_tick{};
+    u32 draw_batch_commands{};
 };
 
 } // namespace Vulkan

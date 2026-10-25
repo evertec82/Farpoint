@@ -13,6 +13,7 @@
 #endif
 #include <xxhash.h>
 
+#include "common/slow_operation.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
@@ -144,16 +145,88 @@ TextureCache::~TextureCache() = default;
 
 void TextureCache::ProcessDownloadImages() {
     std::unique_lock lk{download_images_mutex};
+    if (download_images.empty()) {
+        return;
+    }
+    static const bool batch = [] {
+        const char* value = std::getenv("SHADPS4_BATCH_READBACKS");
+        return value == nullptr || value[0] != '0';
+    }();
+    static const bool timing = std::getenv("SHADPS4_GPU_WAIT_TIMING") != nullptr;
+    const auto start = std::chrono::steady_clock::now();
+    SmallVector<Common::UniqueFunction<void>, 8> completions;
+    u64 bytes = 0;
+    u64 images = 0;
+    u64 single_pixels = 0;
+    const bool grouped = batch && download_images.size() > 1;
     for (const ImageId image_id : download_images) {
-        DownloadImageMemory(image_id, true);
+        auto complete = QueueImageDownload(image_id, grouped, bytes);
+        if (!complete) {
+            continue;
+        }
+        ++images;
+        const auto& size = slot_images[image_id].info.size;
+        single_pixels += size.width == 1 && size.height == 1 && size.depth == 1;
+        if (grouped) {
+            completions.push_back(std::move(complete));
+        } else {
+            scheduler.Finish();
+            complete();
+        }
+    }
+    if (!completions.empty()) {
+        scheduler.Finish();
+        for (auto& complete : completions) {
+            complete();
+        }
     }
     download_images.clear();
+    if (timing && images != 0) {
+        static auto report_start = start;
+        static u64 batches = 0, total_images = 0, total_bytes = 0, total_single_pixels = 0;
+        static u64 saved_waits = 0;
+        static double total_ms = 0.0, max_ms = 0.0;
+        const auto end = std::chrono::steady_clock::now();
+        const double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
+        ++batches;
+        total_images += images;
+        total_bytes += bytes;
+        total_single_pixels += single_pixels;
+        saved_waits += grouped ? images - 1 : 0;
+        total_ms += elapsed;
+        max_ms = std::max(max_ms, elapsed);
+        if (end - report_start >= std::chrono::seconds{10}) {
+            LOG_INFO(Render_Vulkan,
+                     "Readback batches: {} batches, {} images ({} single-pixel), {} bytes, "
+                     "{} waits avoided, {:.2f}ms total, {:.2f}ms max; batching {}",
+                     batches, total_images, total_single_pixels, total_bytes, saved_waits,
+                     total_ms, max_ms, batch);
+            report_start = end;
+            batches = total_images = total_bytes = total_single_pixels = saved_waits = 0;
+            total_ms = max_ms = 0.0;
+        }
+    }
 }
 
 void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
+    u64 bytes = 0;
+    auto complete = QueueImageDownload(image_id, !sync, bytes);
+    if (!complete) {
+        return;
+    }
+    if (sync) {
+        scheduler.Finish();
+        complete();
+    } else {
+        scheduler.DeferPriorityOperation(std::move(complete));
+    }
+}
+
+Common::UniqueFunction<void> TextureCache::QueueImageDownload(ImageId image_id, bool deferred,
+                                                             u64& bytes) {
     Image& image = slot_images[image_id];
     if (False(image.flags & ImageFlagBits::GpuModified)) {
-        return;
+        return {};
     }
     const bool single_pixel = !image.info.props.is_block && image.info.size.width == 1 &&
                               image.info.size.height == 1 && image.info.size.depth == 1 &&
@@ -164,7 +237,7 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
                                         image.info.resources.layers * (image.info.num_bits / 8);
     ASSERT(download_size <= image.info.guest_size);
     const auto download =
-        runtime.GetStagingPool().Request(download_size, MemoryType::HostCached, 16, !sync);
+        runtime.GetStagingPool().Request(download_size, MemoryType::HostCached, 16, deferred);
     const vk::BufferImageCopy image_download = {
         .bufferOffset = download.offset,
         .bufferRowLength = single_pixel ? 0u : image.info.pitch,
@@ -181,20 +254,15 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
         .imageExtent = {image.info.size.width, image.info.size.height, image.info.size.depth},
     };
     runtime.DownloadImage(&image, download.buffer, std::span{&image_download, 1});
-    if (sync) {
-        scheduler.Finish();
+    bytes += download_size;
+    return [this, device_addr = image.info.guest_address, download, download_size, deferred] {
         download.Invalidate();
-        Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(image.info.guest_address),
+        Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr),
                                                   download.mapped, download_size);
-    } else {
-        scheduler.DeferPriorityOperation(
-            [this, device_addr = image.info.guest_address, download, download_size] {
-                download.Invalidate();
-                Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr),
-                                                          download.mapped, download_size);
-                runtime.GetStagingPool().FreeDeferred(download);
-            });
-    }
+        if (deferred) {
+            runtime.GetStagingPool().FreeDeferred(download);
+        }
+    };
 }
 
 void TextureCache::MarkAsMaybeDirty(ImageId image_id, Image& image) {
@@ -258,6 +326,7 @@ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
 }
 
 void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {
+    const Common::SlowOperation timing{"TextureCache::UnmapMemory"};
     SmallVector<ImageId, 16> deleted_images;
     ForEachImageInRegion(cpu_addr, size, [&](ImageId id, Image&) { deleted_images.push_back(id); });
     for (const ImageId id : deleted_images) {
@@ -596,8 +665,8 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     ASSERT(info.guest_address != 0);
 
     SmallVector<ImageId, 8> image_ids;
-    ForEachImageInRegion(info.guest_address, info.guest_size,
-                         [&](ImageId image_id, Image& image) { image_ids.push_back(image_id); });
+    ForEachImageWithAddress(info.guest_address,
+                            [&](ImageId image_id, Image& image) { image_ids.push_back(image_id); });
 
     ImageId image_id{};
 
@@ -627,6 +696,9 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     int view_mip{-1};
     int view_slice{-1};
     if (!image_id) {
+        image_ids.clear();
+        ForEachImageInRegion(info.guest_address, info.guest_size,
+                             [&](ImageId id, Image& image) { image_ids.push_back(id); });
         for (const auto& cache_id : image_ids) {
             view_mip = -1;
             view_slice = -1;

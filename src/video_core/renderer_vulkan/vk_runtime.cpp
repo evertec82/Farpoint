@@ -673,6 +673,7 @@ void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool c
             backing->num_samples > 1, backing->image, new_backing->image);
 
         // Update current layout in tracker to new backings layout
+        new_backing->last_shader_read_range.reset();
         new_backing->state.layout = dst_layout;
         new_backing->state.access_mask = dst_access;
         new_backing->state.pl_stage = dst_stage;

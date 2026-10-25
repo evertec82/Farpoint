@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.IO.Compression;
 using System.Text;
@@ -64,7 +64,7 @@ public static class FarpointProfiles {
   string original=Encoding.UTF8.GetString(ReadConfig(pak));
   if(!original.Contains("r.SceneColorFormat=2")||!original.Contains("r.BloomQuality=1")||!original.Contains("ScreenPercentage=100.000000"))throw new InvalidDataException("Unsupported game configuration");
   string baseline=original.Replace("r.SceneColorFormat=2","r.SceneColorFormat=4").Replace("r.BloomQuality=1","r.BloomQuality=0");
-  int[] widths={960,1536,1920,2160,2400,2688,3072};int[] percentages={100,160,200,225,250,280,320};Directory.CreateDirectory(output);
+  int[] widths={960,1536,1920,2160,2400,2688,3072,3456,3840};int[] percentages={100,160,200,225,250,280,320,360,400};Directory.CreateDirectory(output);
   for(int i=0;i<widths.Length;i++) {
    string text=baseline;
    if(i>0){text=text.Replace("ScreenPercentage=100.000000","ScreenPercentage="+percentages[i]+".000000");text=text.Replace("[SystemSettings]", "[SystemSettings]\n"+"r.ScreenPercentage="+percentages[i]+"\n"+"r.NeoScreenPercentage="+percentages[i]+"\n"+"r.AutoScreenPercentage=0\n");}

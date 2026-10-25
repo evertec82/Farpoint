@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/slow_operation.h"
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/debug.h"
@@ -167,21 +168,21 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
     ASSERT_MSG(IsValidMapping(virtual_addr, size), "Attempted to access invalid address {:#x}",
                virtual_addr);
 
-    std::vector<VirtualMemoryArea> vmas_to_write;
-    auto current_vma = FindVMA(virtual_addr);
-    while (current_vma->second.Overlaps(virtual_addr, size)) {
+    const auto first_vma = FindVMA(virtual_addr);
+    auto current_vma = first_vma;
+    while (current_vma != vma_map.end() && current_vma->second.Overlaps(virtual_addr, size)) {
         if (!HasPhysicalBacking(current_vma->second)) {
             break;
         }
-        vmas_to_write.emplace_back(current_vma->second);
         current_vma++;
     }
 
-    if (vmas_to_write.empty()) {
+    if (current_vma == first_vma) {
         return false;
     }
 
-    for (auto& vma : vmas_to_write) {
+    for (auto it = first_vma; it != current_vma; ++it) {
+        const auto& vma = it->second;
         auto start_in_vma = std::max<VAddr>(virtual_addr, vma.base) - vma.base;
         auto phys_handle = std::prev(vma.phys_areas.upper_bound(start_in_vma));
         for (; phys_handle != vma.phys_areas.end(); phys_handle++) {
@@ -282,6 +283,7 @@ PAddr MemoryManager::Allocate(PAddr search_start, PAddr search_end, u64 size, u6
 }
 
 s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
+    const Common::SlowOperation timing{"MemoryManager::Free"};
     // Basic bounds checking
     if (phys_addr > total_direct_size || (is_checked && phys_addr + size > total_direct_size)) {
         LOG_ERROR(Kernel_Vmm, "phys_addr {:#x}, size {:#x} goes outside dmem map", phys_addr, size);
@@ -338,7 +340,14 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
                 const u64 unmap_size = std::min<u64>(phys_mapping.size - phys_offset, size);
 
                 // Unmapping might erase from vma_map. We can't do it here.
-                remove_list.emplace_back(addr_in_vma, unmap_size);
+                if (!remove_list.empty() &&
+                    remove_list.back().first + remove_list.back().second == addr_in_vma &&
+                    IsValidGpuMapping(remove_list.back().first,
+                                      remove_list.back().second + unmap_size)) {
+                    remove_list.back().second += unmap_size;
+                } else {
+                    remove_list.emplace_back(addr_in_vma, unmap_size);
+                }
             }
         }
     }
@@ -346,6 +355,7 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
     // Early unmap from GPU to avoid deadlocking.
     for (auto& [addr, unmap_size] : remove_list) {
         if (IsValidGpuMapping(addr, unmap_size)) {
+            const Common::SlowOperation timing{"MemoryManager::FreeGpuUnmap"};
             rasterizer->UnmapMemory(addr, unmap_size);
         }
     }
@@ -514,6 +524,7 @@ MemoryManager::VMAHandle MemoryManager::CreateArea(VAddr virtual_addr, u64 size,
 s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, MemoryProt prot,
                              MemoryMapFlags flags, VMAType type, std::string_view name,
                              bool validate_dmem, PAddr phys_addr, u64 alignment) {
+    const Common::SlowOperation timing{"MemoryManager::MapMemory"};
     // Certain games perform flexible mappings on loop to determine
     // the available flexible memory size. Questionable but we need to handle this.
     if (type == VMAType::Flexible && flexible_usage + size > total_flexible_size) {
@@ -909,6 +920,7 @@ s32 MemoryManager::PoolDecommit(VAddr virtual_addr, u64 size) {
 }
 
 s32 MemoryManager::UnmapMemory(VAddr virtual_addr, u64 size) {
+    const Common::SlowOperation timing{"MemoryManager::UnmapMemory"};
     if (size == 0) {
         return ORBIS_OK;
     }
@@ -934,6 +946,7 @@ s32 MemoryManager::UnmapMemory(VAddr virtual_addr, u64 size) {
 }
 
 u64 MemoryManager::UnmapBytesFromEntry(VAddr virtual_addr, VirtualMemoryArea vma_base, u64 size) {
+    const Common::SlowOperation timing{"MemoryManager::UnmapBytesFromEntry"};
     const auto start_in_vma = virtual_addr - vma_base.base;
     const auto size_in_vma = std::min<u64>(vma_base.size - start_in_vma, size);
     const auto vma_type = vma_base.type;

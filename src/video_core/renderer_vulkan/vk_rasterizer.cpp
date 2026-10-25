@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -595,6 +596,23 @@ void Rasterizer::ResetBindings(bool is_compute) {
     bound_images.clear();
     bound_buffers.clear();
     needs_barrier = false;
+    static const u32 submit_batch_size = [] {
+        const char* value = std::getenv("SHADPS4_SUBMIT_BATCH_SIZE");
+        const long parsed = value ? std::strtol(value, nullptr, 10) : 0;
+        const u32 size = parsed > 0 ? static_cast<u32>(std::clamp(parsed, 32l, 4096l)) : 0;
+        LOG_INFO(Render_Vulkan, "Rendering submission batch size: {} (0 disables)", size);
+        return size;
+    }();
+    if (submit_batch_size != 0) {
+        const u64 tick = scheduler.CurrentTick();
+        if (tick != draw_batch_tick) {
+            draw_batch_tick = tick;
+            draw_batch_commands = 0;
+        }
+        if (++draw_batch_commands >= submit_batch_size) {
+            scheduler.Flush();
+        }
+    }
 }
 
 bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {

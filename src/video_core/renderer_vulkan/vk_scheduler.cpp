@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/slow_operation.h"
 #include <algorithm>
 #include <map>
 #include <string_view>
@@ -183,7 +184,16 @@ void Scheduler::Wait(u64 tick, std::source_location caller) {
 
 void Scheduler::PopPendingOperations() {
     std::unique_lock lk(pending_ops_mutex);
-    work_semaphore.Refresh();
+    if (pending_ops.empty()) {
+        return;
+    }
+    const u64 first_tick = pending_ops.front().gpu_tick;
+    if (first_tick >= CurrentTick()) {
+        return;
+    }
+    if (!work_semaphore.IsFree(first_tick)) {
+        work_semaphore.Refresh();
+    }
     while (!pending_ops.empty() && work_semaphore.IsFree(pending_ops.front().gpu_tick)) {
         pending_ops.front().callback();
         pending_ops.pop();
@@ -233,6 +243,7 @@ void Scheduler::EndSession() {
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
+    const Common::SlowOperation timing{"Scheduler::SubmitExecution"};
     std::scoped_lock lk{submit_mutex};
     const u64 signal_value = work_semaphore.NextTick();
 

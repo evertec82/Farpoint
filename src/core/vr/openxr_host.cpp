@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/slow_operation.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -1936,6 +1937,7 @@ struct OpenXrHost::Impl {
             end.layers = layers;
             const auto ending = Clock::now();
             XrResult ended;
+            double runtime_call{};
             {
                 std::scoped_lock lock{QueueMutex()};
                 const auto acquired = Clock::now();
@@ -1944,10 +1946,18 @@ struct OpenXrHost::Impl {
                 const double call = std::chrono::duration<double>(Clock::now() - acquired).count();
                 end_call_time += call;
                 end_call_worst = std::max(end_call_worst, call);
+                runtime_call = call;
             }
             const double took = std::chrono::duration<double>(Clock::now() - ending).count();
             end_frame_time += took;
             end_frame_worst = std::max(end_frame_worst, took);
+            if (runtime_call >= 0.050 && state == XR_SESSION_STATE_FOCUSED) {
+                LOG_INFO(Core_Vr,
+                         "Slow xrEndFrame: {:.2f} ms, shouldRender={}, layers={}, steady_ms={}",
+                         runtime_call * 1000.0, frame_state.shouldRender, layer_count,
+                         std::chrono::duration_cast<std::chrono::milliseconds>(
+                             Clock::now().time_since_epoch()).count());
+            }
             if (layer_count != 0) {
                 // How far the head has turned from where the picture being shown was drawn
                 // for: what the compositor makes up for. Next to nothing while the head rests.
@@ -2361,7 +2371,10 @@ struct OpenXrHost::Impl {
         }
         XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
         wait.timeout = XR_INFINITE_DURATION;
-        result = xrWaitSwapchainImage(swapchain, &wait);
+        {
+            const Common::SlowOperation timing{"OpenXR::WaitSwapchainImage"};
+            result = xrWaitSwapchainImage(swapchain, &wait);
+        }
         if (XR_FAILED(result)) {
             NoteFrameFailure("xrWaitSwapchainImage", result);
         }
@@ -2497,9 +2510,13 @@ struct OpenXrHost::Impl {
                 .commandBufferCount = 1,
                 .pCommandBuffers = &cmdbuf,
             };
-            submitted =
-                graphics.queue.submit(submit_info, fences[buffer]) == vk::Result::eSuccess;
+            {
+                const Common::SlowOperation timing{"OpenXR::SubmitCopy"};
+                submitted =
+                    graphics.queue.submit(submit_info, fences[buffer]) == vk::Result::eSuccess;
+            }
             XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            const Common::SlowOperation timing{"OpenXR::ReleaseSwapchainImage"};
             result = xrReleaseSwapchainImage(swapchain, &release);
         }
         if (XR_FAILED(result)) {
@@ -2509,6 +2526,7 @@ struct OpenXrHost::Impl {
             // RunSession returns the source slot to the renderer immediately afterwards.
             // On another queue it must not be overwritten until this copy (and its layout
             // restoration) has completed. This short wait holds neither queue mutex.
+            const Common::SlowOperation timing{"OpenXR::CopyCompletion"};
             const auto copied = device.waitForFences(fences[buffer], true, UINT64_MAX);
             if (copied != vk::Result::eSuccess) {
                 LOG_ERROR(Core_Vr, "Headset copy completion failed: {}", vk::to_string(copied));
@@ -3007,6 +3025,9 @@ void OpenXrHost::EndFrame(u32 index, const PresentedFrame& info, vk::Semaphore r
         // (Three of a console's frames: a hitch anybody sees.)
         if (gap > 0.050) {
             ++impl->long_gaps;
+            LOG_INFO(Core_Vr, "Title frame gap: {:.2f} ms, steady_ms={}", gap * 1000.0,
+                     std::chrono::duration_cast<std::chrono::milliseconds>(
+                         now.time_since_epoch()).count());
         }
     }
     impl->last_delivery = now;

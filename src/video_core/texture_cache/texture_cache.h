@@ -10,6 +10,7 @@
 #include "common/lru_cache.h"
 #include "common/multi_level_page_table.h"
 #include "common/slot_vector.h"
+#include "common/unique_function.h"
 #include "shader_recompiler/resource.h"
 #include "video_core/texture_cache/blit_helper.h"
 #include "video_core/texture_cache/image.h"
@@ -313,6 +314,7 @@ private:
 
     /// Copies image memory back to CPU.
     void DownloadImageMemory(ImageId image_id, bool sync = false);
+    Common::UniqueFunction<void> QueueImageDownload(ImageId image_id, bool deferred, u64& bytes);
 
     /// Register image in the page table
     void RegisterImage(ImageId image);
