@@ -27,7 +27,7 @@ if (-not $NoGui -and -not $ValidateOnly) {
     Add-Type -AssemblyName System.Drawing
     [System.Windows.Forms.Application]::EnableVisualStyles()
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = 'Farpoint PC VR - v0.9.5 prerelease'
+    $form.Text = 'Farpoint PC VR - v0.9.6 prerelease'
     $form.ClientSize = New-Object System.Drawing.Size(620,465)
     $form.StartPosition = 'CenterScreen'
     $form.FormBorderStyle = 'FixedDialog'
